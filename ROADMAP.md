@@ -29,20 +29,23 @@ Acceptance criteria:
 
 ## Phase 2 — Deployment domain
 
-- [ ] `ApplicationId` / `EnvironmentId` / `DeploymentId`
-- [ ] `Artifact` with version, size, SHA-256
-- [ ] `Deployment`
-- [ ] `DeploymentState`
-- [ ] explicit valid state-transition rules
-- [ ] `DeploymentPlan`
-- [ ] rollback boundary/model
-- [ ] unit tests for every valid and invalid transition
+- [x] `ApplicationId` / `EnvironmentId` / `DeploymentId`
+- [x] `Artifact` with version, size, SHA-256
+- [x] `Deployment`
+- [x] `DeploymentState`
+- [x] explicit valid state-transition rules
+- [x] `DeploymentPlan`
+- [x] rollback boundary/model
+- [x] unit tests for every valid and invalid transition
 
 Acceptance criteria:
 
 - impossible transitions are rejected deterministically;
 - `SUCCEEDED` can only follow successful verification;
-- pre-mutation failure and post-mutation failure have different rollback behavior.
+- pre-mutation failure and post-mutation failure have different rollback behavior;
+- `INSTALL` is the first live-artifact mutation boundary;
+- `PRECHECK`, staging, and backup failures do not trigger automatic rollback;
+- install/restart/verify failures enter rollback only when a rollback point is available.
 
 ## Phase 3 — Durable deployment repository
 
