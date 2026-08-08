@@ -69,20 +69,25 @@ Acceptance criteria:
 
 ## Phase 4 — Remote execution adapter
 
-- [ ] `RemoteExecutionPort`
-- [ ] remote-exec MCP client adapter
-- [ ] `check_target`
-- [ ] capability/task preflight
-- [ ] bounded artifact upload
-- [ ] named task execution
-- [ ] structured remote error mapping
-- [ ] fake/mock remote port for deterministic workflow tests
+- [x] `RemoteExecutionPort`
+- [x] remote-exec MCP client adapter
+- [x] `check_target`
+- [x] capability/task preflight
+- [x] bounded artifact upload
+- [x] named task execution
+- [x] structured remote error mapping
+- [x] fake/mock remote port for deterministic workflow tests
 
 Acceptance criteria:
 
 - deploy-mcp contains no SSH/SFTP implementation;
-- tests can run the full deployment workflow without a real server;
-- real adapter only invokes capabilities exposed by remote-exec-mcp.
+- `RemoteExecMcpAdapter` communicates with a configured remote-exec-mcp process over MCP stdio only;
+- the adapter invokes only `check_target`, `list_tasks`, `upload_file`, and `run_task`, with no raw-shell capability;
+- application preflight rejects unreachable targets and configured tasks that are not currently exposed/authorized;
+- artifact upload delegates remote/local path allowlists, transfer-size bounds, timeout, and overwrite authorization to remote-exec-mcp rather than duplicating its security policy;
+- structured remote `{code, message}` errors remain distinguishable from transport/protocol and malformed-response failures;
+- the fake remote port records typed calls and allows deterministic Phase 5 workflow tests without SSH or a real remote-exec process;
+- contract tests lock the remote-exec-mcp v0.1 structured response shapes consumed by the adapter.
 
 ## Phase 5 — JAR/systemd deployment workflow
 
