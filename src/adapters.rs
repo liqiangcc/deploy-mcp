@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tokio::process::Command;
 
+use crate::config::RemoteExecConfig;
 use crate::ports::{
     RemoteExecutionError, RemoteExecutionPort, RemoteExecutionResult, RemoteTargetCheck,
     RemoteTaskResult, RemoteTransferResult,
@@ -26,6 +27,10 @@ pub struct RemoteExecMcpAdapter {
 }
 
 impl RemoteExecMcpAdapter {
+    pub async fn spawn_from_config(config: &RemoteExecConfig) -> RemoteExecutionResult<Self> {
+        Self::spawn(&config.command, &config.args).await
+    }
+
     pub async fn spawn(command: &str, args: &[String]) -> RemoteExecutionResult<Self> {
         let mut child = Command::new(command);
         child.args(args);
@@ -422,6 +427,53 @@ mod tests {
                 message: "authentication rejected".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn remote_exec_v0_1_structured_wire_shapes_decode() {
+        let check: CheckTargetResponse = decode_value(
+            "check_target",
+            json!({"reachable": true, "remote_identity": "host-key"}),
+        )
+        .unwrap();
+        assert!(check.reachable);
+        assert_eq!(check.remote_identity.as_deref(), Some("host-key"));
+
+        let tasks: ListTasksResponse = decode_value(
+            "list_tasks",
+            json!({
+                "tasks": [{
+                    "name": "restart",
+                    "description": null,
+                    "parameters": {},
+                    "timeout_seconds": 30
+                }]
+            }),
+        )
+        .unwrap();
+        assert_eq!(tasks.tasks[0].name, "restart");
+
+        let upload: UploadResponse =
+            decode_value("upload_file", json!({"bytes_transferred": 42})).unwrap();
+        assert_eq!(upload.bytes_transferred, 42);
+
+        let run: RunTaskResponse = decode_value(
+            "run_task",
+            json!({
+                "result": {
+                    "success": true,
+                    "exit_code": 0,
+                    "stdout": "ok\n",
+                    "stderr": "",
+                    "duration_ms": 12,
+                    "stdout_truncated": false,
+                    "stderr_truncated": false
+                }
+            }),
+        )
+        .unwrap();
+        assert!(run.result.success);
+        assert_eq!(run.result.exit_code, Some(0));
     }
 
     #[test]
