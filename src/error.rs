@@ -11,6 +11,19 @@ pub enum ErrorCode {
     InvalidConfiguration,
     UnknownApplication,
     UnknownEnvironment,
+    InvalidVersion,
+    InvalidArtifact,
+    ArtifactNotFound,
+    ArtifactChanged,
+    ConflictingDeployment,
+    PrecheckFailed,
+    RemoteCapabilityMissing,
+    RemoteExecutionFailed,
+    VerificationFailed,
+    RollbackUnavailable,
+    RollbackFailed,
+    InvalidStateTransition,
+    PersistenceFailed,
 }
 
 impl ErrorCode {
@@ -19,6 +32,19 @@ impl ErrorCode {
             Self::InvalidConfiguration => "invalid_configuration",
             Self::UnknownApplication => "unknown_application",
             Self::UnknownEnvironment => "unknown_environment",
+            Self::InvalidVersion => "invalid_version",
+            Self::InvalidArtifact => "invalid_artifact",
+            Self::ArtifactNotFound => "artifact_not_found",
+            Self::ArtifactChanged => "artifact_changed",
+            Self::ConflictingDeployment => "conflicting_deployment",
+            Self::PrecheckFailed => "precheck_failed",
+            Self::RemoteCapabilityMissing => "remote_capability_missing",
+            Self::RemoteExecutionFailed => "remote_execution_failed",
+            Self::VerificationFailed => "verification_failed",
+            Self::RollbackUnavailable => "rollback_unavailable",
+            Self::RollbackFailed => "rollback_failed",
+            Self::InvalidStateTransition => "invalid_state_transition",
+            Self::PersistenceFailed => "persistence_failed",
         }
     }
 }
@@ -55,18 +81,28 @@ mod tests {
 
     #[test]
     fn error_codes_are_stable() {
-        assert_eq!(
-            ErrorCode::InvalidConfiguration.as_str(),
-            "invalid_configuration"
-        );
-        assert_eq!(
-            ErrorCode::UnknownApplication.as_str(),
-            "unknown_application"
-        );
-        assert_eq!(
-            ErrorCode::UnknownEnvironment.as_str(),
-            "unknown_environment"
-        );
+        let expected = [
+            (ErrorCode::InvalidConfiguration, "invalid_configuration"),
+            (ErrorCode::UnknownApplication, "unknown_application"),
+            (ErrorCode::UnknownEnvironment, "unknown_environment"),
+            (ErrorCode::InvalidVersion, "invalid_version"),
+            (ErrorCode::InvalidArtifact, "invalid_artifact"),
+            (ErrorCode::ArtifactNotFound, "artifact_not_found"),
+            (ErrorCode::ArtifactChanged, "artifact_changed"),
+            (ErrorCode::ConflictingDeployment, "conflicting_deployment"),
+            (ErrorCode::PrecheckFailed, "precheck_failed"),
+            (ErrorCode::RemoteCapabilityMissing, "remote_capability_missing"),
+            (ErrorCode::RemoteExecutionFailed, "remote_execution_failed"),
+            (ErrorCode::VerificationFailed, "verification_failed"),
+            (ErrorCode::RollbackUnavailable, "rollback_unavailable"),
+            (ErrorCode::RollbackFailed, "rollback_failed"),
+            (ErrorCode::InvalidStateTransition, "invalid_state_transition"),
+            (ErrorCode::PersistenceFailed, "persistence_failed"),
+        ];
+
+        for (code, text) in expected {
+            assert_eq!(code.as_str(), text);
+        }
     }
 
     #[test]

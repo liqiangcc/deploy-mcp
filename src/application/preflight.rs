@@ -1,8 +1,3 @@
-//! Deployment use-case orchestration.
-//!
-//! Application services may depend on domain types, configuration, and ports.
-//! They must not depend on SSH/SFTP implementations or MCP protocol types.
-
 use std::collections::BTreeSet;
 
 use thiserror::Error;
@@ -133,7 +128,7 @@ applications:
         let fake = FakeRemoteExecution::default();
         fake.set_target_check(
             "test-server",
-            Ok(RemoteTargetCheck {
+            Ok(crate::ports::RemoteTargetCheck {
                 reachable: true,
                 remote_identity: Some("test-identity".to_owned()),
             }),
@@ -163,7 +158,7 @@ applications:
         let fake = FakeRemoteExecution::default();
         fake.set_target_check(
             "test-server",
-            Ok(RemoteTargetCheck {
+            Ok(crate::ports::RemoteTargetCheck {
                 reachable: true,
                 remote_identity: None,
             }),

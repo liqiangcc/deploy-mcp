@@ -12,6 +12,10 @@ CREATE TABLE IF NOT EXISTS deployments (
     updated_at_unix_ms INTEGER NOT NULL
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_deployments_active_environment
+    ON deployments(application_id, environment_id)
+    WHERE state NOT IN ('succeeded', 'failed', 'rolled_back', 'rollback_failed');
+
 CREATE TABLE IF NOT EXISTS deployment_transitions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     deployment_id TEXT NOT NULL,
