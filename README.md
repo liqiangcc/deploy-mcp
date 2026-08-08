@@ -50,4 +50,16 @@ The first release intentionally supports one production-shaped workflow only:
 
 Docker, Kubernetes, Helm, build pipelines, log querying, and configuration management are explicitly outside the v0.1 boundary.
 
+## Development baseline
+
+The Rust project keeps protocol, application, domain, ports, infrastructure adapters, configuration, and persistence boundaries explicit from the start. The initial configuration shape is documented in [`config/example.yaml`](config/example.yaml).
+
+CI requires:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+```
+
 See [DESIGN.md](DESIGN.md) and [ROADMAP.md](ROADMAP.md).
