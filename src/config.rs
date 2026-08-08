@@ -1,0 +1,224 @@
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
+
+use serde::Deserialize;
+
+use crate::error::{AppError, AppResult, ErrorCode};
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Config {
+    pub applications: BTreeMap<String, ApplicationConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApplicationConfig {
+    pub display_name: Option<String>,
+    pub artifact_type: ArtifactType,
+    pub environments: BTreeMap<String, EnvironmentConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactType {
+    Jar,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EnvironmentConfig {
+    pub target: String,
+    pub staging_path: String,
+    pub install_path: String,
+    pub backup_path: String,
+    pub tasks: TaskReferences,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaskReferences {
+    pub precheck: Option<String>,
+    pub backup: String,
+    pub install: String,
+    pub restart: String,
+    pub health_check: String,
+    pub rollback: Option<String>,
+}
+
+impl Config {
+    pub fn load(path: impl AsRef<Path>) -> AppResult<Self> {
+        let path = path.as_ref();
+        let raw = fs::read_to_string(path).map_err(|error| {
+            AppError::invalid_configuration(format!(
+                "failed to read config {}: {error}",
+                path.display()
+            ))
+        })?;
+        Self::from_yaml(&raw)
+    }
+
+    pub fn from_yaml(raw: &str) -> AppResult<Self> {
+        let config: Self = serde_yaml::from_str(raw).map_err(|error| {
+            AppError::invalid_configuration(format!("failed to parse config: {error}"))
+        })?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> AppResult<()> {
+        if self.applications.is_empty() {
+            return Err(AppError::invalid_configuration(
+                "at least one application must be configured",
+            ));
+        }
+
+        for (application_id, application) in &self.applications {
+            validate_reference("application id", application_id)?;
+            if application.environments.is_empty() {
+                return Err(AppError::invalid_configuration(format!(
+                    "application {application_id} must define at least one environment"
+                )));
+            }
+
+            for (environment_id, environment) in &application.environments {
+                validate_reference("environment id", environment_id)?;
+                validate_reference("target", &environment.target)?;
+                validate_absolute_path("staging_path", &environment.staging_path)?;
+                validate_absolute_path("install_path", &environment.install_path)?;
+                validate_absolute_path("backup_path", &environment.backup_path)?;
+                validate_optional_reference("precheck task", environment.tasks.precheck.as_deref())?;
+                validate_reference("backup task", &environment.tasks.backup)?;
+                validate_reference("install task", &environment.tasks.install)?;
+                validate_reference("restart task", &environment.tasks.restart)?;
+                validate_reference("health_check task", &environment.tasks.health_check)?;
+                validate_optional_reference("rollback task", environment.tasks.rollback.as_deref())?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn application(&self, application: &str) -> AppResult<&ApplicationConfig> {
+        self.applications.get(application).ok_or_else(|| {
+            AppError::new(
+                ErrorCode::UnknownApplication,
+                format!("unknown application: {application}"),
+            )
+        })
+    }
+
+    pub fn environment(
+        &self,
+        application: &str,
+        environment: &str,
+    ) -> AppResult<&EnvironmentConfig> {
+        self.application(application)?
+            .environments
+            .get(environment)
+            .ok_or_else(|| {
+                AppError::new(
+                    ErrorCode::UnknownEnvironment,
+                    format!("unknown environment {environment} for application {application}"),
+                )
+            })
+    }
+}
+
+fn validate_reference(kind: &str, value: &str) -> AppResult<()> {
+    if value.trim().is_empty() {
+        return Err(AppError::invalid_configuration(format!(
+            "{kind} must not be empty"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_optional_reference(kind: &str, value: Option<&str>) -> AppResult<()> {
+    if let Some(value) = value {
+        validate_reference(kind, value)?;
+    }
+    Ok(())
+}
+
+fn validate_absolute_path(kind: &str, value: &str) -> AppResult<()> {
+    if !Path::new(value).is_absolute() {
+        return Err(AppError::invalid_configuration(format!(
+            "{kind} must be absolute: {value}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VALID_CONFIG: &str = r#"
+applications:
+  demo-service:
+    display_name: Demo Service
+    artifact_type: jar
+    environments:
+      test:
+        target: test-server
+        staging_path: /opt/staging/demo-service.jar
+        install_path: /opt/apps/demo-service/demo-service.jar
+        backup_path: /opt/apps/demo-service/backup/demo-service.jar
+        tasks:
+          precheck: demo-precheck
+          backup: demo-backup
+          install: demo-install
+          restart: demo-restart
+          health_check: demo-health
+          rollback: demo-rollback
+"#;
+
+    #[test]
+    fn parses_and_validates_declarative_application_config() {
+        let config = Config::from_yaml(VALID_CONFIG).unwrap();
+        let environment = config.environment("demo-service", "test").unwrap();
+        assert_eq!(environment.target, "test-server");
+        assert_eq!(environment.tasks.restart, "demo-restart");
+        assert_eq!(
+            config.application("demo-service").unwrap().artifact_type,
+            ArtifactType::Jar
+        );
+    }
+
+    #[test]
+    fn rejects_relative_deployment_paths() {
+        let raw = VALID_CONFIG.replace(
+            "/opt/staging/demo-service.jar",
+            "relative/demo-service.jar",
+        );
+        let error = Config::from_yaml(&raw).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfiguration);
+        assert!(error.message.contains("staging_path must be absolute"));
+    }
+
+    #[test]
+    fn rejects_empty_task_references() {
+        let raw = VALID_CONFIG.replace("restart: demo-restart", "restart: ''");
+        let error = Config::from_yaml(&raw).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfiguration);
+        assert!(error.message.contains("restart task must not be empty"));
+    }
+
+    #[test]
+    fn unknown_application_and_environment_use_stable_codes() {
+        let config = Config::from_yaml(VALID_CONFIG).unwrap();
+        assert_eq!(
+            config.application("missing").unwrap_err().code,
+            ErrorCode::UnknownApplication
+        );
+        assert_eq!(
+            config.environment("demo-service", "prod").unwrap_err().code,
+            ErrorCode::UnknownEnvironment
+        );
+    }
+
+    #[test]
+    fn load_reports_io_failure_as_stable_configuration_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let error = Config::load(directory.path().join("missing.yaml")).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfiguration);
+    }
+}
