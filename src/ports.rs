@@ -17,7 +17,7 @@ pub type RepositoryResult<T> = Result<T, RepositoryError>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteTargetCheck {
     pub reachable: bool,
-    pub remote_identity: String,
+    pub remote_identity: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
