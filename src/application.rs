@@ -86,6 +86,8 @@ mod tests {
     use crate::ports::RemoteTargetCheck;
 
     const CONFIG: &str = r#"
+remote_exec:
+  command: remote-exec-mcp
 applications:
   demo:
     artifact_type: jar
