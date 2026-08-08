@@ -13,14 +13,14 @@
 
 ## Phase 1 — Rust project bootstrap
 
-- [ ] Initialize Rust crate/binary
-- [ ] Add module boundaries: domain / application / ports / adapters / mcp / config / persistence
-- [ ] Add CI gates:
+- [x] Initialize Rust crate/binary
+- [x] Add module boundaries: domain / application / ports / adapters / mcp / config / persistence
+- [x] Add CI gates:
   - `cargo fmt --all -- --check`
   - `cargo clippy --all-targets --all-features -- -D warnings`
   - `cargo test --all-features`
-- [ ] Add stable application error model
-- [ ] Add configuration loader and validation
+- [x] Add stable application error model
+- [x] Add configuration loader and validation
 
 Acceptance criteria:
 
