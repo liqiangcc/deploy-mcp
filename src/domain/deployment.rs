@@ -26,37 +26,102 @@ id_type!(ApplicationId);
 id_type!(EnvironmentId);
 id_type!(DeploymentId);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Artifact {
-    pub version: String,
-    pub size: u64,
-    pub sha256: String,
+    version: String,
+    size_bytes: u64,
+    sha256: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+impl Artifact {
+    pub fn new(
+        version: impl Into<String>,
+        size_bytes: u64,
+        sha256: impl Into<String>,
+    ) -> Result<Self, DeploymentError> {
+        let version = version.into();
+        if version.trim().is_empty() {
+            return Err(DeploymentError::InvalidArtifactVersion);
+        }
+        if size_bytes == 0 {
+            return Err(DeploymentError::InvalidArtifactSize);
+        }
+
+        let sha256 = sha256.into();
+        if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(DeploymentError::InvalidArtifactChecksum);
+        }
+
+        Ok(Self {
+            version,
+            size_bytes,
+            sha256: sha256.to_ascii_lowercase(),
+        })
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    pub fn size_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeploymentState {
     Created,
-    Prepared,
-    BackedUp,
-    Installed,
-    Restarted,
-    Verified,
+    Prechecking,
+    StagingArtifact,
+    BackingUp,
+    Installing,
+    Restarting,
+    Verifying,
+    Succeeded,
     Failed,
+    RollingBack,
     RolledBack,
+    RollbackFailed,
 }
 
 impl DeploymentState {
     pub fn can_transition_to(self, next: Self) -> bool {
         matches!(
             (self, next),
-            (Self::Created, Self::Prepared)
-                | (Self::Prepared, Self::BackedUp)
-                | (Self::BackedUp, Self::Installed)
-                | (Self::Installed, Self::Restarted)
-                | (Self::Restarted, Self::Verified)
-                | (_, Self::Failed)
-                | (Self::Failed, Self::RolledBack)
+            (Self::Created, Self::Prechecking)
+                | (Self::Prechecking, Self::StagingArtifact | Self::Failed)
+                | (Self::StagingArtifact, Self::BackingUp | Self::Failed)
+                | (Self::BackingUp, Self::Installing | Self::Failed)
+                | (Self::Installing, Self::Restarting | Self::RollingBack | Self::Failed)
+                | (Self::Restarting, Self::Verifying | Self::RollingBack | Self::Failed)
+                | (Self::Verifying, Self::Succeeded | Self::RollingBack | Self::Failed)
+                | (Self::Succeeded, Self::RollingBack)
+                | (Self::RollingBack, Self::RolledBack | Self::RollbackFailed)
+        )
+    }
+
+    pub fn has_live_mutation_started(self) -> bool {
+        matches!(
+            self,
+            Self::Installing
+                | Self::Restarting
+                | Self::Verifying
+                | Self::Succeeded
+                | Self::RollingBack
+                | Self::RolledBack
+                | Self::RollbackFailed
+        )
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::RolledBack | Self::RollbackFailed
         )
     }
 }
@@ -100,40 +165,198 @@ impl Deployment {
         self.state = next;
         Ok(())
     }
+
+    pub fn fail(&mut self, rollback_available: bool) -> Result<(), DeploymentError> {
+        let next = if self.state.has_live_mutation_started() && rollback_available {
+            DeploymentState::RollingBack
+        } else {
+            DeploymentState::Failed
+        };
+        self.transition(next)
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum DeploymentError {
     #[error("invalid identifier: {0}")]
     InvalidIdentifier(&'static str),
+    #[error("artifact version must not be empty")]
+    InvalidArtifactVersion,
+    #[error("artifact size must be greater than zero")]
+    InvalidArtifactSize,
+    #[error("artifact sha256 must contain exactly 64 hexadecimal characters")]
+    InvalidArtifactChecksum,
     #[error("invalid deployment transition: {from:?} -> {to:?}")]
-    InvalidTransition { from: DeploymentState, to: DeploymentState },
+    InvalidTransition {
+        from: DeploymentState,
+        to: DeploymentState,
+    },
+    #[error("deployment plan target must not be empty")]
+    InvalidPlanTarget,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const SHA256: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
     fn deployment() -> Deployment {
         Deployment::new(
             DeploymentId::new("d1").unwrap(),
             ApplicationId::new("app").unwrap(),
             EnvironmentId::new("test").unwrap(),
-            Artifact { version: "1".into(), size: 1, sha256: "abc".into() },
+            Artifact::new("1.0.0", 1, SHA256).unwrap(),
         )
     }
 
     #[test]
-    fn accepts_valid_state_flow() {
-        let mut deployment = deployment();
-        deployment.transition(DeploymentState::Prepared).unwrap();
-        deployment.transition(DeploymentState::BackedUp).unwrap();
-        assert_eq!(deployment.state(), DeploymentState::BackedUp);
+    fn artifact_rejects_invalid_identity_fields() {
+        assert_eq!(
+            Artifact::new("", 1, SHA256).unwrap_err(),
+            DeploymentError::InvalidArtifactVersion
+        );
+        assert_eq!(
+            Artifact::new("1.0.0", 0, SHA256).unwrap_err(),
+            DeploymentError::InvalidArtifactSize
+        );
+        assert_eq!(
+            Artifact::new("1.0.0", 1, "abc").unwrap_err(),
+            DeploymentError::InvalidArtifactChecksum
+        );
     }
 
     #[test]
-    fn rejects_invalid_transition() {
+    fn artifact_normalizes_checksum_case() {
+        let artifact = Artifact::new("1.0.0", 42, SHA256.to_ascii_uppercase()).unwrap();
+        assert_eq!(artifact.version(), "1.0.0");
+        assert_eq!(artifact.size_bytes(), 42);
+        assert_eq!(artifact.sha256(), SHA256);
+    }
+
+    #[test]
+    fn transition_matrix_is_exhaustive() {
+        use DeploymentState::*;
+
+        let states = [
+            Created,
+            Prechecking,
+            StagingArtifact,
+            BackingUp,
+            Installing,
+            Restarting,
+            Verifying,
+            Succeeded,
+            Failed,
+            RollingBack,
+            RolledBack,
+            RollbackFailed,
+        ];
+        let allowed = [
+            (Created, Prechecking),
+            (Prechecking, StagingArtifact),
+            (Prechecking, Failed),
+            (StagingArtifact, BackingUp),
+            (StagingArtifact, Failed),
+            (BackingUp, Installing),
+            (BackingUp, Failed),
+            (Installing, Restarting),
+            (Installing, RollingBack),
+            (Installing, Failed),
+            (Restarting, Verifying),
+            (Restarting, RollingBack),
+            (Restarting, Failed),
+            (Verifying, Succeeded),
+            (Verifying, RollingBack),
+            (Verifying, Failed),
+            (Succeeded, RollingBack),
+            (RollingBack, RolledBack),
+            (RollingBack, RollbackFailed),
+        ];
+
+        for from in states {
+            for to in states {
+                assert_eq!(
+                    from.can_transition_to(to),
+                    allowed.contains(&(from, to)),
+                    "unexpected transition verdict for {from:?} -> {to:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn success_is_only_reachable_after_verification() {
+        use DeploymentState::*;
+        let states = [
+            Created,
+            Prechecking,
+            StagingArtifact,
+            BackingUp,
+            Installing,
+            Restarting,
+            Verifying,
+            Succeeded,
+            Failed,
+            RollingBack,
+            RolledBack,
+            RollbackFailed,
+        ];
+
+        for state in states {
+            assert_eq!(
+                state.can_transition_to(Succeeded),
+                state == Verifying,
+                "only verifying may transition to succeeded"
+            );
+        }
+    }
+
+    #[test]
+    fn failure_before_live_mutation_does_not_rollback() {
         let mut deployment = deployment();
-        assert!(deployment.transition(DeploymentState::Verified).is_err());
+        deployment.transition(DeploymentState::Prechecking).unwrap();
+        deployment
+            .transition(DeploymentState::StagingArtifact)
+            .unwrap();
+        deployment.transition(DeploymentState::BackingUp).unwrap();
+        deployment.fail(true).unwrap();
+        assert_eq!(deployment.state(), DeploymentState::Failed);
+    }
+
+    #[test]
+    fn failure_after_live_mutation_enters_rollback_when_available() {
+        let mut deployment = deployment();
+        deployment.transition(DeploymentState::Prechecking).unwrap();
+        deployment
+            .transition(DeploymentState::StagingArtifact)
+            .unwrap();
+        deployment.transition(DeploymentState::BackingUp).unwrap();
+        deployment.transition(DeploymentState::Installing).unwrap();
+        deployment.fail(true).unwrap();
+        assert_eq!(deployment.state(), DeploymentState::RollingBack);
+    }
+
+    #[test]
+    fn post_mutation_failure_without_rollback_finishes_failed() {
+        let mut deployment = deployment();
+        deployment.transition(DeploymentState::Prechecking).unwrap();
+        deployment
+            .transition(DeploymentState::StagingArtifact)
+            .unwrap();
+        deployment.transition(DeploymentState::BackingUp).unwrap();
+        deployment.transition(DeploymentState::Installing).unwrap();
+        deployment.fail(false).unwrap();
+        assert_eq!(deployment.state(), DeploymentState::Failed);
+    }
+
+    #[test]
+    fn terminal_failure_states_cannot_resume() {
+        use DeploymentState::*;
+        assert!(Failed.is_terminal());
+        assert!(RolledBack.is_terminal());
+        assert!(RollbackFailed.is_terminal());
+        assert!(!RollingBack.is_terminal());
+        assert!(!Created.can_transition_to(Succeeded));
     }
 }
