@@ -67,6 +67,7 @@ RemoteExecMcpAdapter
 remote-exec-mcp
    |
    +--> check_target
+   +--> list_tasks
    +--> upload_file
    +--> run_task
    v
@@ -217,13 +218,13 @@ SUCCEEDED
 Failure behavior:
 
 ```text
-CREATED / PRECHECKING / STAGING_ARTIFACT
+CREATED / PRECHECKING / STAGING_ARTIFACT / BACKING_UP
         |
         +---- failure ----> FAILED
 
-BACKING_UP / INSTALLING / RESTARTING / VERIFYING
+INSTALLING / RESTARTING / VERIFYING
         |
-        +---- failure ----> ROLLING_BACK
+        +---- failure ----> ROLLING_BACK   (only when rollback is available)
                               |
                          +----+----+
                          |         |
@@ -231,13 +232,15 @@ BACKING_UP / INSTALLING / RESTARTING / VERIFYING
                    ROLLED_BACK  ROLLBACK_FAILED
 ```
 
+`INSTALLING` is the first live-artifact mutation boundary. Staging and backup prepare deployment/rollback material but must not replace the live artifact.
+
 Important invariant:
 
 > A deployment is never `SUCCEEDED` merely because the process restarted. It becomes `SUCCEEDED` only after the configured verification step passes.
 
 Another invariant:
 
-> Failures before the first target mutation do not trigger rollback. Failures after the mutation boundary must enter an explicit rollback outcome when rollback is configured.
+> Failures before the first live-artifact mutation do not trigger rollback. Failures after the mutation boundary enter an explicit rollback outcome only when a rollback point is available; otherwise they end as `FAILED`.
 
 ## 7. Deployment step semantics
 
@@ -252,15 +255,15 @@ Checks deterministic prerequisites before mutation, for example:
 
 ### STAGE_ARTIFACT
 
-Uses `RemoteExecutionPort.upload_file` to copy the artifact to a bounded staging location. Staging must not replace the live artifact.
+Uses `RemoteExecutionPort.upload_file` to copy the artifact to a bounded staging location. Staging must not replace the live artifact. `deploy-mcp` supplies the configured destination; `remote-exec-mcp` independently enforces local/remote allowlists, transfer size limits, timeout, and overwrite policy.
 
 ### BACKUP_CURRENT
 
-Creates/restores a known rollback point through an approved remote task. The deployment record stores the previous version/backup reference when available.
+Creates/restores a known rollback point through an approved remote task. The deployment record stores the previous version/backup reference when available. Backup itself remains before the live-artifact mutation boundary.
 
 ### INSTALL
 
-Moves or installs the staged artifact into the configured live location through an approved task. `deploy-mcp` decides *when* install occurs; `remote-exec-mcp` decides whether the underlying operation is authorized and how it is safely executed.
+Moves or installs the staged artifact into the configured live location through an approved task. This is the first live-artifact mutation. `deploy-mcp` decides *when* install occurs; `remote-exec-mcp` decides whether the underlying operation is authorized and how it is safely executed.
 
 ### RESTART
 
@@ -276,7 +279,7 @@ Restores the previous artifact and restarts/verifies the service using configure
 
 ## 8. RemoteExecutionPort
 
-The application layer depends on a narrow port similar to:
+The application layer depends on a narrow port:
 
 ```text
 RemoteExecutionPort
@@ -286,9 +289,15 @@ RemoteExecutionPort
 - run_task(target, task, parameters)
 ```
 
-The first adapter calls `remote-exec-mcp`. No SSH library belongs in `deploy-mcp` v0.1.
+The first adapter calls `remote-exec-mcp` over MCP stdio using a configured child process. No SSH library belongs in `deploy-mcp` v0.1.
+
+The adapter owns only MCP request/response conversion and structured remote error decoding. Deployment capability rules remain in the application layer. In particular, preflight calls `check_target` and `list_tasks`, then verifies that every task referenced by the selected environment is currently exposed/authorized.
 
 Why retain `list_tasks` even though deployment config already contains task names: startup/precheck can fail early if a configured capability is missing or not authorized for the target.
+
+Remote-exec failures preserve their structured `{code, message}` cause and remain distinguishable from MCP transport/protocol failures or malformed responses.
+
+A deterministic fake `RemoteExecutionPort` is used by application/workflow tests, so deployment logic does not require a live SSH server or a remote-exec process.
 
 ## 9. MCP surface
 
@@ -402,11 +411,16 @@ This duplication is intentional because they answer different questions.
 
 ## 14. Configuration principle
 
-Configuration is declarative. It maps deployment concepts to approved remote capabilities.
+Configuration is declarative. It maps deployment concepts to approved remote capabilities and points at the remote-exec MCP process to compose.
 
 Example shape:
 
 ```yaml
+remote_exec:
+  command: remote-exec-mcp
+  args:
+    - /etc/remote-exec/config.yaml
+
 applications:
   demo-service:
     artifact_type: jar
@@ -425,7 +439,7 @@ applications:
           rollback: demo-rollback
 ```
 
-Paths are deployment configuration, but actual filesystem authorization remains enforced independently by `remote-exec-mcp` policy.
+The remote-exec executable/arguments are startup configuration, never MCP tool inputs. Paths are deployment configuration, but actual filesystem authorization remains enforced independently by `remote-exec-mcp` policy.
 
 ## 15. Explicit non-goals for v0.1
 
