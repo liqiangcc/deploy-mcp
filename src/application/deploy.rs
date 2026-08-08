@@ -376,7 +376,13 @@ where
         let result = self.remote.run_task(target, task, parameters).await;
         let failure = match result {
             Ok(result) if result.success => None,
-            Ok(result) => Some(task_result_failure(step, failure_code, action, task, &result)),
+            Ok(result) => Some(task_result_failure(
+                step,
+                failure_code,
+                action,
+                task,
+                &result,
+            )),
             Err(error) => Some(DeploymentFailure::from_remote(
                 step,
                 failure_code,
@@ -480,12 +486,10 @@ where
     fn transition(&self, deployment: &mut Deployment, next: DeploymentState) -> AppResult<()> {
         let from = deployment.state();
         let mut candidate = deployment.clone();
-        candidate.transition(next).map_err(|error| {
-            AppError::new(ErrorCode::InvalidStateTransition, error.to_string())
-        })?;
-        self.repository(|repository| {
-            repository.persist_transition(deployment.id(), from, next)
-        })?;
+        candidate
+            .transition(next)
+            .map_err(|error| AppError::new(ErrorCode::InvalidStateTransition, error.to_string()))?;
+        self.repository(|repository| repository.persist_transition(deployment.id(), from, next))?;
         *deployment = candidate;
         Ok(())
     }
@@ -521,12 +525,12 @@ where
         }
     }
 
-    fn repository<T>(
-        &self,
-        operation: impl FnOnce(&mut D) -> RepositoryResult<T>,
-    ) -> AppResult<T> {
+    fn repository<T>(&self, operation: impl FnOnce(&mut D) -> RepositoryResult<T>) -> AppResult<T> {
         let mut repository = self.repository.lock().map_err(|_| {
-            AppError::new(ErrorCode::PersistenceFailed, "deployment repository lock poisoned")
+            AppError::new(
+                ErrorCode::PersistenceFailed,
+                "deployment repository lock poisoned",
+            )
         })?;
         operation(&mut *repository).map_err(repository_error)
     }
@@ -799,9 +803,7 @@ applications:
     }
 
     fn repository() -> Arc<Mutex<SqliteDeploymentRepository>> {
-        Arc::new(Mutex::new(
-            SqliteDeploymentRepository::in_memory().unwrap(),
-        ))
+        Arc::new(Mutex::new(SqliteDeploymentRepository::in_memory().unwrap()))
     }
 
     #[tokio::test]
@@ -812,11 +814,7 @@ applications:
         let artifact_path = artifact_path.to_string_lossy().into_owned();
         let fake = configured_remote(&artifact_path, 11);
         let repository = repository();
-        let service = DeployService::new(
-            config(),
-            Arc::new(fake.clone()),
-            Arc::clone(&repository),
-        );
+        let service = DeployService::new(config(), Arc::new(fake.clone()), Arc::clone(&repository));
 
         let outcome = service.deploy(request(&artifact_path)).await.unwrap();
         assert_eq!(outcome.deployment.state(), DeploymentState::Succeeded);
@@ -843,12 +841,22 @@ applications:
         let calls = fake.calls();
         assert!(matches!(calls[0], FakeRemoteCall::CheckTarget { .. }));
         assert!(matches!(calls[1], FakeRemoteCall::ListTasks { .. }));
-        assert!(matches!(calls[2], FakeRemoteCall::RunTask { ref task, .. } if task == "demo-precheck"));
+        assert!(
+            matches!(calls[2], FakeRemoteCall::RunTask { ref task, .. } if task == "demo-precheck")
+        );
         assert!(matches!(calls[3], FakeRemoteCall::UploadFile { .. }));
-        assert!(matches!(calls[4], FakeRemoteCall::RunTask { ref task, .. } if task == "demo-backup"));
-        assert!(matches!(calls[5], FakeRemoteCall::RunTask { ref task, .. } if task == "demo-install"));
-        assert!(matches!(calls[6], FakeRemoteCall::RunTask { ref task, .. } if task == "demo-restart"));
-        assert!(matches!(calls[7], FakeRemoteCall::RunTask { ref task, .. } if task == "demo-health"));
+        assert!(
+            matches!(calls[4], FakeRemoteCall::RunTask { ref task, .. } if task == "demo-backup")
+        );
+        assert!(
+            matches!(calls[5], FakeRemoteCall::RunTask { ref task, .. } if task == "demo-install")
+        );
+        assert!(
+            matches!(calls[6], FakeRemoteCall::RunTask { ref task, .. } if task == "demo-restart")
+        );
+        assert!(
+            matches!(calls[7], FakeRemoteCall::RunTask { ref task, .. } if task == "demo-health")
+        );
 
         match &calls[4] {
             FakeRemoteCall::RunTask { parameters, .. } => {
@@ -858,9 +866,7 @@ applications:
                 );
                 assert_eq!(
                     parameters.get("backup_path"),
-                    Some(&Value::String(
-                        "/opt/apps/demo/backup/demo.jar".to_owned()
-                    ))
+                    Some(&Value::String("/opt/apps/demo/backup/demo.jar".to_owned()))
                 );
             }
             _ => unreachable!(),
@@ -880,11 +886,7 @@ applications:
             Ok(failed_task("install failed")),
         );
         let repository = repository();
-        let service = DeployService::new(
-            config(),
-            Arc::new(fake.clone()),
-            Arc::clone(&repository),
-        );
+        let service = DeployService::new(config(), Arc::new(fake.clone()), Arc::clone(&repository));
 
         let outcome = service.deploy(request(&artifact_path)).await.unwrap();
         assert_eq!(outcome.deployment.state(), DeploymentState::RolledBack);

@@ -9,6 +9,4 @@ mod preflight;
 
 pub use deploy::{DeployRequest, DeployService, DeploymentFailure, DeploymentOutcome};
 pub use lock::{DeploymentLease, DeploymentLockManager};
-pub use preflight::{
-    preflight_remote_capabilities, RemotePreflightError, RemotePreflightReport,
-};
+pub use preflight::{preflight_remote_capabilities, RemotePreflightError, RemotePreflightReport};

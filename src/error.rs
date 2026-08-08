@@ -91,12 +91,18 @@ mod tests {
             (ErrorCode::ArtifactChanged, "artifact_changed"),
             (ErrorCode::ConflictingDeployment, "conflicting_deployment"),
             (ErrorCode::PrecheckFailed, "precheck_failed"),
-            (ErrorCode::RemoteCapabilityMissing, "remote_capability_missing"),
+            (
+                ErrorCode::RemoteCapabilityMissing,
+                "remote_capability_missing",
+            ),
             (ErrorCode::RemoteExecutionFailed, "remote_execution_failed"),
             (ErrorCode::VerificationFailed, "verification_failed"),
             (ErrorCode::RollbackUnavailable, "rollback_unavailable"),
             (ErrorCode::RollbackFailed, "rollback_failed"),
-            (ErrorCode::InvalidStateTransition, "invalid_state_transition"),
+            (
+                ErrorCode::InvalidStateTransition,
+                "invalid_state_transition",
+            ),
             (ErrorCode::PersistenceFailed, "persistence_failed"),
         ];
 
