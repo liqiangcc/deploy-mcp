@@ -1,3 +1,8 @@
+remote_exec:
+  command: remote-exec-mcp
+  args:
+    - /etc/remote-exec/config.yaml
+
 applications:
   demo-service:
     display_name: Demo Service
