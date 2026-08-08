@@ -84,12 +84,18 @@ impl Config {
                 validate_absolute_path("staging_path", &environment.staging_path)?;
                 validate_absolute_path("install_path", &environment.install_path)?;
                 validate_absolute_path("backup_path", &environment.backup_path)?;
-                validate_optional_reference("precheck task", environment.tasks.precheck.as_deref())?;
+                validate_optional_reference(
+                    "precheck task",
+                    environment.tasks.precheck.as_deref(),
+                )?;
                 validate_reference("backup task", &environment.tasks.backup)?;
                 validate_reference("install task", &environment.tasks.install)?;
                 validate_reference("restart task", &environment.tasks.restart)?;
                 validate_reference("health_check task", &environment.tasks.health_check)?;
-                validate_optional_reference("rollback task", environment.tasks.rollback.as_deref())?;
+                validate_optional_reference(
+                    "rollback task",
+                    environment.tasks.rollback.as_deref(),
+                )?;
             }
         }
 
@@ -185,10 +191,8 @@ applications:
 
     #[test]
     fn rejects_relative_deployment_paths() {
-        let raw = VALID_CONFIG.replace(
-            "/opt/staging/demo-service.jar",
-            "relative/demo-service.jar",
-        );
+        let raw =
+            VALID_CONFIG.replace("/opt/staging/demo-service.jar", "relative/demo-service.jar");
         let error = Config::from_yaml(&raw).unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidConfiguration);
         assert!(error.message.contains("staging_path must be absolute"));
