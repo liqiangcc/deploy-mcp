@@ -91,41 +91,57 @@ Acceptance criteria:
 
 ## Phase 5 — JAR/systemd deployment workflow
 
-- [ ] request validation
-- [ ] artifact checksum calculation
-- [ ] deployment-level lock per `(application, environment)`
-- [ ] PRECHECKING
-- [ ] STAGING_ARTIFACT
-- [ ] BACKING_UP
-- [ ] INSTALLING
-- [ ] RESTARTING
-- [ ] VERIFYING
-- [ ] SUCCEEDED
-- [ ] automatic rollback after post-mutation failure
-- [ ] ROLLED_BACK / ROLLBACK_FAILED
-- [ ] preserve original failure separately from rollback failure
+- [x] request validation
+- [x] artifact checksum calculation
+- [x] deployment-level lock per `(application, environment)`
+- [x] PRECHECKING
+- [x] STAGING_ARTIFACT
+- [x] BACKING_UP
+- [x] INSTALLING
+- [x] RESTARTING
+- [x] VERIFYING
+- [x] SUCCEEDED
+- [x] automatic rollback after post-mutation failure
+- [x] ROLLED_BACK / ROLLBACK_FAILED
+- [x] preserve original failure separately from rollback failure
 
 Acceptance criteria:
 
 ```text
 deploy request
-  -> precheck
-  -> stage
-  -> backup
-  -> install
+  -> validate configured application/environment/version
+  -> stream artifact SHA-256 + size
+  -> acquire deployment lock
+  -> persist CREATED
+  -> precheck target/capabilities
+  -> stage artifact
+  -> backup current artifact
+  -> install staged artifact
   -> restart
   -> verify
-  -> success
+  -> SUCCEEDED
 ```
 
 and on post-mutation failure:
 
 ```text
-failure
-  -> rollback
-  -> restart/verify previous release
-  -> rolled_back | rollback_failed
+install/restart/verify failure
+  -> ROLLING_BACK
+  -> restore configured backup
+  -> restart
+  -> verify previous release
+  -> ROLLED_BACK | ROLLBACK_FAILED
 ```
+
+Additional invariants:
+
+- backup failure is pre-mutation and ends as `FAILED` without rollback;
+- remote task failures are recorded as durable step attempts before the workflow advances;
+- persistence failure prevents later remote work from continuing;
+- in-process leases reject concurrent work for the same application/environment;
+- SQLite also has a partial unique index for non-terminal deployments, so separate repository/process instances sharing the database cannot create two active deployments for the same application/environment;
+- deployment paths are passed only as structured task parameters; deploy-mcp never turns them into shell strings;
+- original deployment failure and rollback failure remain separate in the application result.
 
 ## Phase 6 — MCP adapter
 
