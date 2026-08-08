@@ -55,9 +55,18 @@ mod tests {
 
     #[test]
     fn error_codes_are_stable() {
-        assert_eq!(ErrorCode::InvalidConfiguration.as_str(), "invalid_configuration");
-        assert_eq!(ErrorCode::UnknownApplication.as_str(), "unknown_application");
-        assert_eq!(ErrorCode::UnknownEnvironment.as_str(), "unknown_environment");
+        assert_eq!(
+            ErrorCode::InvalidConfiguration.as_str(),
+            "invalid_configuration"
+        );
+        assert_eq!(
+            ErrorCode::UnknownApplication.as_str(),
+            "unknown_application"
+        );
+        assert_eq!(
+            ErrorCode::UnknownEnvironment.as_str(),
+            "unknown_environment"
+        );
     }
 
     #[test]
