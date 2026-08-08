@@ -3,10 +3,70 @@
 //! Persistence and remote-execution adapters implement these traits. The core
 //! depends only on these stable contracts, never on SQLite, SSH, or MCP crates.
 
-use crate::domain::{Deployment, DeploymentId, DeploymentState, DeploymentStep};
+use std::collections::{BTreeMap, BTreeSet};
+
+use async_trait::async_trait;
+use serde_json::Value;
 use thiserror::Error;
 
+use crate::domain::{Deployment, DeploymentId, DeploymentState, DeploymentStep};
+
+pub type RemoteExecutionResult<T> = Result<T, RemoteExecutionError>;
 pub type RepositoryResult<T> = Result<T, RepositoryError>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteTargetCheck {
+    pub reachable: bool,
+    pub remote_identity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteTransferResult {
+    pub bytes_transferred: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteTaskResult {
+    pub success: bool,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub duration_ms: u128,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+}
+
+#[async_trait]
+pub trait RemoteExecutionPort: Send + Sync {
+    async fn check_target(&self, target: &str) -> RemoteExecutionResult<RemoteTargetCheck>;
+
+    async fn list_tasks(&self, target: &str) -> RemoteExecutionResult<BTreeSet<String>>;
+
+    async fn upload_file(
+        &self,
+        target: &str,
+        local_path: &str,
+        remote_path: &str,
+        overwrite: bool,
+    ) -> RemoteExecutionResult<RemoteTransferResult>;
+
+    async fn run_task(
+        &self,
+        target: &str,
+        task: &str,
+        parameters: BTreeMap<String, Value>,
+    ) -> RemoteExecutionResult<RemoteTaskResult>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum RemoteExecutionError {
+    #[error("remote-exec transport/protocol error: {0}")]
+    Transport(String),
+    #[error("remote-exec error {code}: {message}")]
+    Remote { code: String, message: String },
+    #[error("invalid response from remote-exec tool {tool}: {message}")]
+    InvalidResponse { tool: String, message: String },
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StepAttemptId(u64);
