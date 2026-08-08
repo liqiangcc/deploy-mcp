@@ -97,9 +97,18 @@ impl DeploymentState {
                 | (Self::Prechecking, Self::StagingArtifact | Self::Failed)
                 | (Self::StagingArtifact, Self::BackingUp | Self::Failed)
                 | (Self::BackingUp, Self::Installing | Self::Failed)
-                | (Self::Installing, Self::Restarting | Self::RollingBack | Self::Failed)
-                | (Self::Restarting, Self::Verifying | Self::RollingBack | Self::Failed)
-                | (Self::Verifying, Self::Succeeded | Self::RollingBack | Self::Failed)
+                | (
+                    Self::Installing,
+                    Self::Restarting | Self::RollingBack | Self::Failed
+                )
+                | (
+                    Self::Restarting,
+                    Self::Verifying | Self::RollingBack | Self::Failed
+                )
+                | (
+                    Self::Verifying,
+                    Self::Succeeded | Self::RollingBack | Self::Failed
+                )
                 | (Self::Succeeded, Self::RollingBack)
                 | (Self::RollingBack, Self::RolledBack | Self::RollbackFailed)
         )
