@@ -32,12 +32,18 @@ impl RemoteExecMcpAdapter {
         let transport = TokioChildProcess::new(child)
             .map_err(|error| RemoteExecutionError::Transport(error.to_string()))?;
         let client = ().serve(transport).await.map_err(|error| {
-            RemoteExecutionError::Transport(format!("failed to initialize remote-exec MCP: {error}"))
+            RemoteExecutionError::Transport(format!(
+                "failed to initialize remote-exec MCP: {error}"
+            ))
         })?;
         Ok(Self { client })
     }
 
-    async fn call(&self, tool: &'static str, arguments: Map<String, Value>) -> RemoteExecutionResult<Value> {
+    async fn call(
+        &self,
+        tool: &'static str,
+        arguments: Map<String, Value>,
+    ) -> RemoteExecutionResult<Value> {
         let result = self
             .client
             .call_tool(CallToolRequestParams::new(tool).with_arguments(arguments))
@@ -175,12 +181,12 @@ struct RemoteErrorEnvelope {
 }
 
 fn decode_tool_result(tool: &'static str, result: CallToolResult) -> RemoteExecutionResult<Value> {
-    let value = result.structured_content.ok_or_else(|| {
-        RemoteExecutionError::InvalidResponse {
+    let value = result
+        .structured_content
+        .ok_or_else(|| RemoteExecutionError::InvalidResponse {
             tool: tool.to_owned(),
             message: "missing structured_content".to_owned(),
-        }
-    })?;
+        })?;
 
     if result.is_error == Some(true) {
         let error: RemoteErrorEnvelope = decode_value(tool, value)?;
@@ -420,7 +426,8 @@ mod tests {
 
     #[test]
     fn malformed_success_response_is_distinct_from_remote_error() {
-        let value = decode_tool_result("upload_file", CallToolResult::structured(json!({}))).unwrap();
+        let value =
+            decode_tool_result("upload_file", CallToolResult::structured(json!({}))).unwrap();
         let error = decode_value::<UploadResponse>("upload_file", value).unwrap_err();
         assert!(matches!(
             error,
