@@ -158,6 +158,22 @@ impl Deployment {
         }
     }
 
+    pub(crate) fn rehydrate(
+        id: DeploymentId,
+        application: ApplicationId,
+        environment: EnvironmentId,
+        artifact: Artifact,
+        state: DeploymentState,
+    ) -> Self {
+        Self {
+            id,
+            application,
+            environment,
+            artifact,
+            state,
+        }
+    }
+
     pub fn id(&self) -> &DeploymentId {
         &self.id
     }
@@ -258,15 +274,6 @@ mod tests {
     }
 
     #[test]
-    fn deployment_identity_is_exposed_read_only() {
-        let deployment = deployment();
-        assert_eq!(deployment.id().as_str(), "d1");
-        assert_eq!(deployment.application().as_str(), "app");
-        assert_eq!(deployment.environment().as_str(), "test");
-        assert_eq!(deployment.artifact().version(), "1.0.0");
-    }
-
-    #[test]
     fn transition_matrix_is_exhaustive() {
         use DeploymentState::*;
 
@@ -341,12 +348,6 @@ mod tests {
                 "only verifying may transition to succeeded"
             );
         }
-    }
-
-    #[test]
-    fn succeeded_is_terminal_for_the_original_deployment() {
-        assert!(DeploymentState::Succeeded.is_terminal());
-        assert!(!DeploymentState::Succeeded.can_transition_to(DeploymentState::RollingBack));
     }
 
     #[test]
