@@ -109,7 +109,6 @@ impl DeploymentState {
                     Self::Verifying,
                     Self::Succeeded | Self::RollingBack | Self::Failed
                 )
-                | (Self::Succeeded, Self::RollingBack)
                 | (Self::RollingBack, Self::RolledBack | Self::RollbackFailed)
         )
     }
@@ -120,7 +119,6 @@ impl DeploymentState {
             Self::Installing
                 | Self::Restarting
                 | Self::Verifying
-                | Self::Succeeded
                 | Self::RollingBack
                 | Self::RolledBack
                 | Self::RollbackFailed
@@ -137,10 +135,10 @@ impl DeploymentState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Deployment {
-    pub id: DeploymentId,
-    pub application: ApplicationId,
-    pub environment: EnvironmentId,
-    pub artifact: Artifact,
+    id: DeploymentId,
+    application: ApplicationId,
+    environment: EnvironmentId,
+    artifact: Artifact,
     state: DeploymentState,
 }
 
@@ -158,6 +156,22 @@ impl Deployment {
             artifact,
             state: DeploymentState::Created,
         }
+    }
+
+    pub fn id(&self) -> &DeploymentId {
+        &self.id
+    }
+
+    pub fn application(&self) -> &ApplicationId {
+        &self.application
+    }
+
+    pub fn environment(&self) -> &EnvironmentId {
+        &self.environment
+    }
+
+    pub fn artifact(&self) -> &Artifact {
+        &self.artifact
     }
 
     pub fn state(&self) -> DeploymentState {
@@ -244,6 +258,15 @@ mod tests {
     }
 
     #[test]
+    fn deployment_identity_is_exposed_read_only() {
+        let deployment = deployment();
+        assert_eq!(deployment.id().as_str(), "d1");
+        assert_eq!(deployment.application().as_str(), "app");
+        assert_eq!(deployment.environment().as_str(), "test");
+        assert_eq!(deployment.artifact().version(), "1.0.0");
+    }
+
+    #[test]
     fn transition_matrix_is_exhaustive() {
         use DeploymentState::*;
 
@@ -278,7 +301,6 @@ mod tests {
             (Verifying, Succeeded),
             (Verifying, RollingBack),
             (Verifying, Failed),
-            (Succeeded, RollingBack),
             (RollingBack, RolledBack),
             (RollingBack, RollbackFailed),
         ];
@@ -319,6 +341,12 @@ mod tests {
                 "only verifying may transition to succeeded"
             );
         }
+    }
+
+    #[test]
+    fn succeeded_is_terminal_for_the_original_deployment() {
+        assert!(DeploymentState::Succeeded.is_terminal());
+        assert!(!DeploymentState::Succeeded.can_transition_to(DeploymentState::RollingBack));
     }
 
     #[test]
