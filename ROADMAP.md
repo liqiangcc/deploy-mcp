@@ -49,19 +49,23 @@ Acceptance criteria:
 
 ## Phase 3 — Durable deployment repository
 
-- [ ] `DeploymentRepository` port
-- [ ] SQLite implementation
-- [ ] schema/migrations
-- [ ] deployment record persistence
-- [ ] step-attempt persistence
-- [ ] state-transition history
-- [ ] transaction boundaries for state changes
-- [ ] recovery tests for interrupted/non-terminal deployments
+- [x] `DeploymentRepository` port
+- [x] SQLite implementation
+- [x] schema/migrations
+- [x] deployment record persistence
+- [x] step-attempt persistence
+- [x] state-transition history
+- [x] transaction boundaries for state changes
+- [x] recovery tests for interrupted/non-terminal deployments
 
 Acceptance criteria:
 
 - process restart does not erase deployment state;
-- persistence failure prevents unrecorded mutation from continuing.
+- non-terminal deployments can be rehydrated after reopening the SQLite database;
+- durable state and transition history are committed atomically;
+- optimistic expected-state checks reject stale writers without leaving partial history;
+- step attempts are durable and a completed attempt cannot be completed twice;
+- persistence failure/conflict stops state advancement before later deployment work can continue.
 
 ## Phase 4 — Remote execution adapter
 
