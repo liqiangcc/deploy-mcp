@@ -222,7 +222,9 @@ applications:
         let raw = VALID_CONFIG.replace("command: remote-exec-mcp", "command: ''");
         let error = Config::from_yaml(&raw).unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidConfiguration);
-        assert!(error.message.contains("remote_exec.command must not be empty"));
+        assert!(error
+            .message
+            .contains("remote_exec.command must not be empty"));
     }
 
     #[test]
