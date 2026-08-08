@@ -8,7 +8,15 @@ use crate::error::{AppError, AppResult, ErrorCode};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
+    pub remote_exec: RemoteExecConfig,
     pub applications: BTreeMap<String, ApplicationConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RemoteExecConfig {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -64,6 +72,12 @@ impl Config {
     }
 
     pub fn validate(&self) -> AppResult<()> {
+        validate_reference("remote_exec.command", &self.remote_exec.command)?;
+        validate_process_value("remote_exec.command", &self.remote_exec.command)?;
+        for (index, argument) in self.remote_exec.args.iter().enumerate() {
+            validate_process_value(&format!("remote_exec.args[{index}]"), argument)?;
+        }
+
         if self.applications.is_empty() {
             return Err(AppError::invalid_configuration(
                 "at least one application must be configured",
@@ -153,11 +167,24 @@ fn validate_absolute_path(kind: &str, value: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn validate_process_value(kind: &str, value: &str) -> AppResult<()> {
+    if value.contains('\0') {
+        return Err(AppError::invalid_configuration(format!(
+            "{kind} must not contain NUL"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const VALID_CONFIG: &str = r#"
+remote_exec:
+  command: remote-exec-mcp
+  args:
+    - /etc/remote-exec/config.yaml
 applications:
   demo-service:
     display_name: Demo Service
@@ -181,12 +208,21 @@ applications:
     fn parses_and_validates_declarative_application_config() {
         let config = Config::from_yaml(VALID_CONFIG).unwrap();
         let environment = config.environment("demo-service", "test").unwrap();
+        assert_eq!(config.remote_exec.command, "remote-exec-mcp");
         assert_eq!(environment.target, "test-server");
         assert_eq!(environment.tasks.restart, "demo-restart");
         assert_eq!(
             config.application("demo-service").unwrap().artifact_type,
             ArtifactType::Jar
         );
+    }
+
+    #[test]
+    fn rejects_empty_remote_exec_command() {
+        let raw = VALID_CONFIG.replace("command: remote-exec-mcp", "command: ''");
+        let error = Config::from_yaml(&raw).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfiguration);
+        assert!(error.message.contains("remote_exec.command must not be empty"));
     }
 
     #[test]
