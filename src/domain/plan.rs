@@ -40,12 +40,12 @@ impl RollbackBoundary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeploymentPlan {
-    pub deployment_id: DeploymentId,
-    pub target: String,
-    pub artifact: Artifact,
-    pub steps: Vec<DeploymentStep>,
-    pub rollback_boundary: RollbackBoundary,
-    pub rollback_available: bool,
+    deployment_id: DeploymentId,
+    target: String,
+    artifact: Artifact,
+    steps: Vec<DeploymentStep>,
+    rollback_boundary: RollbackBoundary,
+    rollback_available: bool,
 }
 
 impl DeploymentPlan {
@@ -75,6 +75,30 @@ impl DeploymentPlan {
             rollback_boundary: RollbackBoundary::jar_systemd(),
             rollback_available,
         })
+    }
+
+    pub fn deployment_id(&self) -> &DeploymentId {
+        &self.deployment_id
+    }
+
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    pub fn artifact(&self) -> &Artifact {
+        &self.artifact
+    }
+
+    pub fn steps(&self) -> &[DeploymentStep] {
+        &self.steps
+    }
+
+    pub fn rollback_boundary(&self) -> RollbackBoundary {
+        self.rollback_boundary
+    }
+
+    pub fn rollback_available(&self) -> bool {
+        self.rollback_available
     }
 
     pub fn requires_rollback_after_failure(&self, failed_step: DeploymentStep) -> bool {
@@ -114,8 +138,8 @@ mod tests {
     fn jar_systemd_plan_has_fixed_order_and_install_mutation_boundary() {
         let plan = plan(true);
         assert_eq!(
-            plan.steps,
-            vec![
+            plan.steps(),
+            [
                 DeploymentStep::Precheck,
                 DeploymentStep::StageArtifact,
                 DeploymentStep::BackupCurrent,
@@ -125,9 +149,18 @@ mod tests {
             ]
         );
         assert_eq!(
-            plan.rollback_boundary.first_live_mutation(),
+            plan.rollback_boundary().first_live_mutation(),
             DeploymentStep::Install
         );
+    }
+
+    #[test]
+    fn plan_identity_and_artifact_are_exposed_read_only() {
+        let plan = plan(true);
+        assert_eq!(plan.deployment_id().as_str(), "d1");
+        assert_eq!(plan.target(), "test-server");
+        assert_eq!(plan.artifact().version(), "1.0.0");
+        assert!(plan.rollback_available());
     }
 
     #[test]
