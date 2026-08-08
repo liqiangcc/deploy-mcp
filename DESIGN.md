@@ -80,7 +80,7 @@ Dependency direction:
 Domain <- Application <- Adapters
 ```
 
-The domain/application layers know only `RemoteExecutionPort`. They do not know SSH, SFTP, `rmcp`, or the concrete `remote-exec-mcp` process.
+The domain/application layers know only application-owned ports. They do not know SSH, SFTP, `rmcp`, or remote-exec transport internals.
 
 ## 4. v0.1 scope
 
@@ -97,16 +97,18 @@ systemd-managed service
 The v0.1 deployment contract includes:
 
 1. validate application/environment/version request;
-2. verify target connectivity/capability;
-3. stage the artifact to a bounded remote staging path;
-4. record current deployed version when available;
-5. back up the current artifact before mutation;
+2. read the local artifact and compute stable size + SHA-256 before remote mutation;
+3. verify target connectivity and required configured capabilities;
+4. stage the artifact to a bounded remote staging path;
+5. create a configured backup rollback point before live mutation;
 6. install the staged artifact;
 7. restart the configured service;
 8. verify health deterministically;
 9. mark success only after verification;
-10. rollback automatically after a post-mutation failure when rollback is possible;
-11. persist terminal deployment status.
+10. rollback automatically after a post-mutation failure when rollback is available;
+11. persist deployment state transitions and step attempts.
+
+Building source, discovering arbitrary service commands, or interpreting logs to decide deployment success are not part of v0.1.
 
 ## 5. Domain model
 
@@ -133,43 +135,43 @@ Environment
 - staging_path
 - install_path
 - backup_path
+- backup_task
+- install_task
 - restart_task
 - health_check_task
 - optional precheck_task
-- optional install_task
 - optional rollback_task
 ```
 
-`target` and task names are references to externally configured capabilities. The deployment domain must not translate them into raw SSH commands.
+`target` and task names are references to externally configured capabilities. The deployment domain never translates them into raw SSH commands.
 
 ### Artifact
 
+The durable domain artifact contains identity/integrity metadata:
+
 ```text
 Artifact
-- source_path
 - version
 - sha256
 - size_bytes
 ```
 
-`version` identifies the logical release. `sha256` identifies the bytes being deployed. A deployment record must preserve both so that retries cannot silently substitute different content under the same version.
+`artifact_path` is request/application input used to read and upload the local file; it is intentionally not part of the durable Artifact value object. `version` identifies the logical release and `sha256` identifies the bytes being deployed.
 
 ### Deployment
+
+The current domain aggregate is intentionally small:
 
 ```text
 Deployment
 - id
 - application
 - environment
-- requested_version
-- artifact_sha256
-- previous_version
+- artifact
 - state
-- started_at
-- finished_at
-- failure
-- rollback_state
 ```
+
+Operational history is not duplicated into mutable aggregate fields. Timestamps, state-transition history, step-attempt status, and step failures are durable repository records. The application result (`DeploymentOutcome`) separately carries the primary deployment failure and rollback failure for the current request.
 
 ### DeploymentPlan
 
@@ -182,6 +184,7 @@ DeploymentPlan
 - artifact
 - ordered steps
 - rollback boundary
+- rollback availability
 ```
 
 The plan contains deployment operations, not shell strings.
@@ -234,48 +237,61 @@ INSTALLING / RESTARTING / VERIFYING
 
 `INSTALLING` is the first live-artifact mutation boundary. Staging and backup prepare deployment/rollback material but must not replace the live artifact.
 
-Important invariant:
+Important invariants:
 
-> A deployment is never `SUCCEEDED` merely because the process restarted. It becomes `SUCCEEDED` only after the configured verification step passes.
-
-Another invariant:
+> A deployment becomes `SUCCEEDED` only after the configured verification task passes.
 
 > Failures before the first live-artifact mutation do not trigger rollback. Failures after the mutation boundary enter an explicit rollback outcome only when a rollback point is available; otherwise they end as `FAILED`.
+
+`SUCCEEDED` remains terminal for the original deployment. A future explicit user-requested rollback must be modeled as a separate application use case/operation rather than reopening the completed deployment state machine.
 
 ## 7. Deployment step semantics
 
 ### PRECHECK
 
-Checks deterministic prerequisites before mutation, for example:
+Checks deterministic prerequisites before mutation:
 
-- target reachable;
-- required remote-exec tasks exist/are allowed;
-- artifact is readable and checksum is stable;
+- target is reachable;
+- required remote-exec task names exist/are allowed;
+- artifact is a readable, non-empty regular file and its checksum/size are computed before remote work;
 - no conflicting deployment is active for the same application/environment.
+
+Capability preflight currently validates task presence by name. The actual typed task-parameter schema remains owned and enforced by `remote-exec-mcp`; a schema mismatch therefore fails deterministically when `run_task` is invoked rather than being guessed by deploy-mcp.
 
 ### STAGE_ARTIFACT
 
-Uses `RemoteExecutionPort.upload_file` to copy the artifact to a bounded staging location. Staging must not replace the live artifact. `deploy-mcp` supplies the configured destination; `remote-exec-mcp` independently enforces local/remote allowlists, transfer size limits, timeout, and overwrite policy.
+Uses `RemoteExecutionPort.upload_file` to copy the artifact to the configured staging location. Staging must not replace the live artifact. `deploy-mcp` supplies the configured destination; `remote-exec-mcp` independently enforces local/remote allowlists, transfer-size bounds, timeout, and overwrite behavior.
+
+The returned byte count must equal the size hashed before deployment. A mismatch is treated as `artifact_changed` and the workflow does not proceed to backup/install.
 
 ### BACKUP_CURRENT
 
-Creates/restores a known rollback point through an approved remote task. The deployment record stores the previous version/backup reference when available. Backup itself remains before the live-artifact mutation boundary.
+Creates a rollback point through the configured approved backup task. Backup itself remains before the live-artifact mutation boundary.
 
 ### INSTALL
 
-Moves or installs the staged artifact into the configured live location through an approved task. This is the first live-artifact mutation. `deploy-mcp` decides *when* install occurs; `remote-exec-mcp` decides whether the underlying operation is authorized and how it is safely executed.
+Moves or installs the staged artifact into the configured live location through the approved install task. This is the first live-artifact mutation. `deploy-mcp` decides *when* install occurs; `remote-exec-mcp` decides whether the underlying task is authorized and safely executable.
 
 ### RESTART
 
-Invokes the environment's approved restart task.
+Invokes the configured approved restart task.
 
 ### VERIFY
 
-Invokes a deterministic health-check task. v0.1 does not accept AI interpretation of arbitrary logs as the success criterion.
+Invokes the configured deterministic health-check task. v0.1 does not accept AI interpretation of arbitrary logs as the success criterion.
 
 ### ROLLBACK
 
-Restores the previous artifact and restarts/verifies the service using configured approved tasks. Rollback has its own terminal result and must not overwrite the original failure reason.
+Automatic rollback after an install/restart/verify failure performs:
+
+```text
+restore backup task
+  -> restart task
+  -> health-check task
+  -> ROLLED_BACK | ROLLBACK_FAILED
+```
+
+Rollback has its own terminal result and never overwrites the primary deployment failure in `DeploymentOutcome`. The durable step-attempt history also preserves which operation failed.
 
 ## 8. RemoteExecutionPort
 
@@ -291,13 +307,34 @@ RemoteExecutionPort
 
 The first adapter calls `remote-exec-mcp` over MCP stdio using a configured child process. No SSH library belongs in `deploy-mcp` v0.1.
 
-The adapter owns only MCP request/response conversion and structured remote error decoding. Deployment capability rules remain in the application layer. In particular, preflight calls `check_target` and `list_tasks`, then verifies that every task referenced by the selected environment is currently exposed/authorized.
-
-Why retain `list_tasks` even though deployment config already contains task names: startup/precheck can fail early if a configured capability is missing or not authorized for the target.
+The adapter owns only MCP request/response conversion and structured remote error decoding. Deployment capability rules remain in the application layer. Preflight calls `check_target` and `list_tasks`, then verifies that every task referenced by the selected environment is currently exposed/authorized.
 
 Remote-exec failures preserve their structured `{code, message}` cause and remain distinguishable from MCP transport/protocol failures or malformed responses.
 
-A deterministic fake `RemoteExecutionPort` is used by application/workflow tests, so deployment logic does not require a live SSH server or a remote-exec process.
+A deterministic fake `RemoteExecutionPort` is used by application/workflow tests, so deployment logic does not require a live SSH server or remote-exec process.
+
+### JAR/systemd task parameter contract
+
+Deployment paths cross the port only as typed JSON task parameters, never as shell fragments:
+
+```text
+backup task
+  install_path
+  backup_path
+
+install task
+  staging_path
+  install_path
+
+rollback task
+  backup_path
+  install_path
+
+precheck / restart / health-check
+  no deploy-mcp-defined path parameters
+```
+
+The matching `remote-exec-mcp` task definitions must declare and validate these parameters. The names above are a deterministic adapter contract between the two independently deployable MCPs; they do not grant arbitrary filesystem access.
 
 ## 9. MCP surface
 
@@ -332,7 +369,7 @@ Returns recent deployment records for an application/environment.
 
 ### rollback_deployment
 
-Explicitly rolls back a successful or failed deployment when its rollback point remains valid.
+Planned explicit rollback entry point. It must be implemented as its own application use case and must not reopen a `SUCCEEDED` Deployment aggregate.
 
 No MCP tool accepts a raw command, SSH credential, arbitrary service name, arbitrary install path, or shell script body.
 
@@ -342,36 +379,44 @@ Deployment concurrency is different from remote command concurrency.
 
 v0.1 invariant:
 
-> At most one mutating deployment may run for a given `(application, environment)` at a time.
+> At most one non-terminal deployment may exist for a given `(application, environment)` at a time.
 
-A retry with the same deployment/idempotency key must not create a second mutation sequence.
+Phase 5 enforces this at two independent levels:
 
-A retry that reuses the same logical version with a different artifact checksum must be rejected unless explicitly modeled as a different deployment/version.
+1. `DeploymentLockManager` provides a process-local lease to reject concurrent calls before work starts;
+2. SQLite has a partial unique index on `(application_id, environment_id)` for non-terminal states, so separate repository/process instances sharing the same database cannot create two active deployments.
+
+The durable constraint is the final authority. A process-local lock alone is never considered sufficient for correctness.
+
+Idempotency-key semantics and same-version/different-checksum retry policy are Phase 7 hardening items and must not be inferred from the Phase 5 deployment lock.
 
 ## 11. Persistence
 
 Deployment state must survive the MCP process lifetime. In-memory state is insufficient because losing the process during `INSTALLING` or `ROLLING_BACK` must not erase what happened.
 
-For v0.1, use a small durable repository abstraction. SQLite is the preferred initial implementation because it provides transactional local persistence without introducing another service.
+For v0.1, SQLite implements the `DeploymentRepository` port and stores:
 
-Suggested persisted records:
+- deployment identity, artifact version/checksum/size, and current state;
+- deployment step attempts and their error text;
+- state-transition history;
+- timestamps for durable records.
 
-- deployment;
-- deployment step attempt;
-- state transition;
-- artifact checksum/version metadata;
-- rollback reference/result.
+State and transition history are updated atomically with optimistic expected-state checks. A persistence error/conflict prevents later workflow operations from running.
 
-Do not persist SSH secrets or arbitrary remote-exec task parameters containing secret values.
+Primary and rollback failures are separate in the in-flight `DeploymentOutcome`. Durable diagnosis uses the terminal deployment state plus ordered step-attempt records, so a rollback failure does not erase the original failed deployment step.
+
+Do not persist SSH secrets or arbitrary credentials. Remote-exec owns its own security/audit boundary.
 
 ## 12. Error model
 
-Errors should be stable and machine-readable. Initial categories:
+Errors are stable and machine-readable. Current categories include:
 
 ```text
+invalid_configuration
 unknown_application
 unknown_environment
 invalid_version
+invalid_artifact
 artifact_not_found
 artifact_changed
 conflicting_deployment
@@ -385,14 +430,13 @@ invalid_state_transition
 persistence_failed
 ```
 
-Remote-exec errors should be preserved as structured causes where useful, but the public deployment error should describe the deployment-level failure.
+Remote-exec errors preserve their structured remote code where useful, while the deployment-level error describes the failed deployment operation.
 
 Example:
 
 ```text
 verification_failed
-  caused_by: remote_execution_failed
-    caused_by: execution_timeout
+  remote_code: execution_timeout
 ```
 
 ## 13. Audit boundary
@@ -403,11 +447,11 @@ Two audit layers are expected and must not be confused:
 remote-exec audit
 = what remote capability was invoked and how it ended
 
-deploy audit/history
-= why that capability was invoked as part of deployment X and how the deployment state changed
+deploy history
+= why that capability was invoked as part of deployment X and how deployment state/steps changed
 ```
 
-This duplication is intentional because they answer different questions.
+This separation is intentional because the two histories answer different questions.
 
 ## 14. Configuration principle
 
@@ -439,7 +483,7 @@ applications:
           rollback: demo-rollback
 ```
 
-The remote-exec executable/arguments are startup configuration, never MCP tool inputs. Paths are deployment configuration, but actual filesystem authorization remains enforced independently by `remote-exec-mcp` policy.
+The remote-exec executable/arguments are startup configuration, never MCP tool inputs. Paths are deployment configuration and are passed only through the structured task contract above. Actual task authorization, parameter validation, and filesystem/execution safety remain independently enforced by `remote-exec-mcp`.
 
 ## 15. Explicit non-goals for v0.1
 
@@ -465,9 +509,11 @@ The architecture is considered preserved when all of the following remain true:
 
 1. no domain/application module imports SSH/SFTP implementation types;
 2. no MCP tool accepts raw shell;
-3. all target mutations are represented by deployment state transitions;
-4. success requires deterministic verification;
-5. rollback is explicit and separately observable;
-6. deployment state is durable;
-7. remote execution authorization is still enforced by `remote-exec-mcp`;
-8. adding Docker/Kubernetes later does not require changing the core deployment state-machine concepts.
+3. deployment paths cross the remote port only as structured task parameters;
+4. all target mutations are represented by deployment state transitions;
+5. success requires deterministic verification;
+6. rollback is explicit and separately observable from the primary failure;
+7. deployment state and step history are durable;
+8. active deployment exclusion has a durable database-level constraint, not only an in-memory lock;
+9. remote execution authorization and typed task validation remain enforced by `remote-exec-mcp`;
+10. adding Docker/Kubernetes later does not require transport-specific branches throughout the deployment domain.
