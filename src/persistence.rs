@@ -133,12 +133,7 @@ impl DeploymentRepository for SqliteDeploymentRepository {
                 "UPDATE deployments
                  SET state = ?1, updated_at_unix_ms = ?2
                  WHERE id = ?3 AND state = ?4",
-                params![
-                    state_name(to),
-                    now,
-                    id.as_str(),
-                    state_name(expected_from)
-                ],
+                params![state_name(to), now, id.as_str(), state_name(expected_from)],
             )
             .map_err(storage_error)?;
 
@@ -166,12 +161,7 @@ impl DeploymentRepository for SqliteDeploymentRepository {
                 "INSERT INTO deployment_transitions (
                     deployment_id, from_state, to_state, occurred_at_unix_ms
                  ) VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    id.as_str(),
-                    state_name(expected_from),
-                    state_name(to),
-                    now
-                ],
+                params![id.as_str(), state_name(expected_from), state_name(to), now],
             )
             .map_err(storage_error)?;
 
@@ -481,11 +471,7 @@ mod tests {
                 )
                 .unwrap();
             repository
-                .persist_transition(
-                    &id,
-                    DeploymentState::BackingUp,
-                    DeploymentState::Installing,
-                )
+                .persist_transition(&id, DeploymentState::BackingUp, DeploymentState::Installing)
                 .unwrap();
         }
 
@@ -528,9 +514,15 @@ mod tests {
         let id = deployment.id().clone();
         repository.create(&deployment).unwrap();
 
-        let attempt = repository.start_step(&id, DeploymentStep::Precheck).unwrap();
+        let attempt = repository
+            .start_step(&id, DeploymentStep::Precheck)
+            .unwrap();
         repository
-            .finish_step(attempt, StepAttemptStatus::Failed, Some("target unavailable"))
+            .finish_step(
+                attempt,
+                StepAttemptStatus::Failed,
+                Some("target unavailable"),
+            )
             .unwrap();
         assert_eq!(
             repository
