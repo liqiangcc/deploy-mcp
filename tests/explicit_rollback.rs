@@ -38,12 +38,16 @@ struct Fixture {
     application: Application,
 }
 
-fn config(install_path: &str) -> Arc<Config> {
+fn config(install_path: &str, artifact_root: &Path) -> Arc<Config> {
+    let artifact_root = serde_json::to_string(artifact_root.to_string_lossy().as_ref()).unwrap();
     Arc::new(
         Config::from_yaml(&format!(
             r#"
 remote_exec:
   command: remote-exec-mcp
+local_artifacts:
+  allowed_roots:
+    - {artifact_root}
 applications:
   demo:
     artifact_type: jar
@@ -122,9 +126,13 @@ fn configured_remote(artifact_path: &str, artifact_size: u64) -> FakeRemoteExecu
             "demo-rollback".to_owned(),
         ])),
     );
+    let canonical_artifact = fs::canonicalize(artifact_path)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     remote.set_upload_result(
         "test-server",
-        artifact_path,
+        &canonical_artifact,
         STAGING_PATH,
         true,
         Ok(RemoteTransferResult {
@@ -150,7 +158,7 @@ fn fixture() -> Fixture {
     let bytes = b"explicit-rollback-test-jar";
     fs::write(&artifact, bytes).unwrap();
     let artifact_path = artifact.to_string_lossy().into_owned();
-    let config = config(INSTALL_PATH);
+    let config = config(INSTALL_PATH, directory.path());
     let remote = configured_remote(&artifact_path, bytes.len() as u64);
     let application = application_for_database(Arc::clone(&config), remote.clone(), &database_path);
     Fixture {
@@ -356,8 +364,9 @@ async fn environment_contract_drift_rejects_rollback_before_remote_work() {
     let deployment_id = deployment.outcome.deployment.id().clone();
 
     let changed_remote = FakeRemoteExecution::default();
+    let artifact_root = Path::new(&fixture.artifact_path).parent().unwrap();
     let changed = application_for_database(
-        config("/opt/apps/demo/changed.jar"),
+        config("/opt/apps/demo/changed.jar", artifact_root),
         changed_remote.clone(),
         &fixture.database_path,
     );
