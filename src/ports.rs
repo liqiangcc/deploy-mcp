@@ -104,6 +104,88 @@ pub struct StepAttemptRecord {
     pub finished_at_unix_ms: Option<i64>,
 }
 
+/// Subject that produced one structured deployment-history event.
+///
+/// Audit subjects are an observation model only; they do not form another
+/// deployment state machine or authorize any mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditSubjectKind {
+    Deployment,
+    RollbackReference,
+    RollbackOperation,
+    RecoveryIncident,
+}
+
+impl AuditSubjectKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Deployment => "deployment",
+            Self::RollbackReference => "rollback_reference",
+            Self::RollbackOperation => "rollback_operation",
+            Self::RecoveryIncident => "recovery_incident",
+        }
+    }
+}
+
+/// Stable event kinds exposed by the structured deployment-history read model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditEventKind {
+    DeploymentCreated,
+    DeploymentTransition,
+    DeploymentStepStarted,
+    DeploymentStepSucceeded,
+    DeploymentStepFailed,
+    RollbackReferenceRecorded,
+    RollbackReferenceSuperseded,
+    RollbackReferenceConsumed,
+    RollbackOperationStarted,
+    RollbackOperationSucceeded,
+    RollbackOperationFailed,
+    RecoveryIncidentRecorded,
+    RecoveryAcknowledged,
+}
+
+impl AuditEventKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DeploymentCreated => "deployment_created",
+            Self::DeploymentTransition => "deployment_transition",
+            Self::DeploymentStepStarted => "deployment_step_started",
+            Self::DeploymentStepSucceeded => "deployment_step_succeeded",
+            Self::DeploymentStepFailed => "deployment_step_failed",
+            Self::RollbackReferenceRecorded => "rollback_reference_recorded",
+            Self::RollbackReferenceSuperseded => "rollback_reference_superseded",
+            Self::RollbackReferenceConsumed => "rollback_reference_consumed",
+            Self::RollbackOperationStarted => "rollback_operation_started",
+            Self::RollbackOperationSucceeded => "rollback_operation_succeeded",
+            Self::RollbackOperationFailed => "rollback_operation_failed",
+            Self::RecoveryIncidentRecorded => "recovery_incident_recorded",
+            Self::RecoveryAcknowledged => "recovery_acknowledged",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AuditEvent {
+    pub deployment_id: DeploymentId,
+    pub application: String,
+    pub environment: String,
+    pub subject_kind: AuditSubjectKind,
+    pub subject_id: String,
+    pub kind: AuditEventKind,
+    pub attributes: Value,
+    pub occurred_at_unix_ms: i64,
+}
+
+/// Read-only projection over durable deployment/rollback/recovery facts.
+pub trait AuditRepository: Send + Sync {
+    fn events_for_deployment(
+        &self,
+        deployment_id: &DeploymentId,
+        limit: usize,
+    ) -> RepositoryResult<Vec<AuditEvent>>;
+}
+
 #[derive(Debug, Clone)]
 pub enum DeploymentReservation {
     Created,
