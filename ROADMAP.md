@@ -179,7 +179,8 @@ Acceptance criteria:
 
 - [ ] idempotency key support
 - [ ] reject same version with changed checksum
-- [ ] startup recovery policy for non-terminal deployments and `STARTED` rollback operations
+- [x] startup recovery policy for non-terminal deployments and `STARTED` rollback operations
+- [ ] operator reconciliation/acknowledgement for unresolved recovery incidents
 - [ ] deployment-level structured audit/history
 - [ ] timeouts at deployment-step and explicit-rollback-operation level
 - [ ] deterministic verification retry policy
@@ -189,9 +190,20 @@ Acceptance criteria:
 - [ ] disposable integration test using a real remote-exec-mcp process or equivalent protocol fixture
 - [ ] README/config/client setup documentation
 
+Startup recovery acceptance criteria:
+
+- recovery is a separate `StartupRecoveryService` / `RecoveryRepository` concern rather than a transport-specific branch in `Deployment` or `RollbackOperation`;
+- startup recovery runs before `remote-exec-mcp` is spawned and never performs remote work or infers remote state;
+- an interrupted deployment before `INSTALLING` is durably terminated as `FAILED`, any `STARTED` step attempt is closed as failed, and an `auto_resolved` recovery incident permits later mutation;
+- an interrupted deployment at or after `INSTALLING` is durably terminated as `FAILED` but creates an unresolved `manual_reconciliation_required` incident because live remote state may be unknown;
+- an interrupted explicit rollback is durably terminated as `FAILED`, preserves its active rollback reference, and creates an unresolved recovery incident;
+- unresolved incidents survive restart and SQLite connection boundaries and block both new deployments and explicit rollbacks for the same application/environment;
+- startup recovery is idempotent and does not create duplicate incidents/transitions on a later restart;
+- clearing an unresolved incident is intentionally not part of automatic startup recovery; it requires the still-open operator reconciliation/acknowledgement hardening item.
+
 ## v0.1 completion boundary
 
-v0.1 is complete when a Java JAR can be deployed to one configured Linux/systemd environment through `remote-exec-mcp`, with durable state, deterministic verification, automatic rollback, safe deployment-bound explicit rollback, deployment history, and no unrestricted remote execution surface in deploy-mcp.
+v0.1 is complete when a Java JAR can be deployed to one configured Linux/systemd environment through `remote-exec-mcp`, with durable state, deterministic verification, automatic rollback, safe deployment-bound explicit rollback, fail-closed crash recovery, deployment history, and no unrestricted remote execution surface in deploy-mcp.
 
 ## Post-v0.1 candidates
 
@@ -210,4 +222,4 @@ Do not start these until the generic deployment lifecycle has proven stable:
 
 The rule for future expansion is:
 
-> New deployment mechanisms should implement ports/adapters around the same deployment lifecycle, not add transport-specific branches throughout the domain model.
+> New deployment mechanisms should implement ports/adapters around the same deployment lifecycle, not add transport-specific branches throughout the deployment domain model.
