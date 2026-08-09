@@ -181,7 +181,7 @@ Acceptance criteria:
 - [x] reject same version with changed checksum
 - [x] startup recovery policy for non-terminal deployments and `STARTED` rollback operations
 - [x] operator reconciliation/acknowledgement for unresolved recovery incidents
-- [ ] deployment-level structured audit/history
+- [x] deployment-level structured audit/history
 - [ ] timeouts at deployment-step and explicit-rollback-operation level
 - [ ] deterministic verification retry policy
 - [ ] rollback-reference retention/cleanup policy
@@ -202,6 +202,18 @@ Deployment identity acceptance criteria:
 - SQLite `BEGIN IMMEDIATE` reservation transactions serialize idempotency lookup, version-identity validation, deployment insertion, and key binding across repository/process instances;
 - idempotency/version identity does not weaken active-deployment, explicit-rollback, or unresolved-recovery mutation guards;
 - MCP continues to deny undeclared raw execution fields; `idempotency_key` cannot control remote paths, commands, tasks, services, or credentials.
+
+Structured audit/history acceptance criteria:
+
+- `AuditRepository` is a read-only observation port; it cannot change deployment, rollback, or recovery state and has no `RemoteExecutionPort` dependency;
+- v0.1 creates no duplicate audit write/event store: history is projected from authoritative durable deployment, step-attempt, rollback, recovery-incident, and reconciliation records already owned by their existing repositories;
+- `get_deployment_history` accepts only `deployment_id` plus a limit bounded to `1..=500`; the MCP adapter does not query SQLite directly;
+- the timeline exposes stable structured events for deployment creation/transitions/steps, rollback-reference and explicit-rollback lifecycle, recovery incidents, and operator acknowledgement;
+- recovery incidents whose subject is an explicit rollback operation are correlated back to that operation's `source_deployment_id`;
+- normal AI-facing history does not expose rollback target/path/task snapshot details, credentials, shell controls, or operator reconciliation evidence;
+- the projection survives SQLite connection/process reopen because it reconstructs from committed durable source facts rather than process-local logs;
+- same-millisecond events are deterministically ordered for rendering, but the tie-break order is not treated as additional causal/state-machine semantics;
+- a dedicated cross-repository test proves deployment -> rollback STARTED -> crash recovery -> manual incident -> operator acknowledgement -> database reopen as one recoverable structured timeline.
 
 Startup recovery acceptance criteria:
 
