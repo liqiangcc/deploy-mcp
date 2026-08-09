@@ -27,11 +27,24 @@ type Application = DeploymentApplication<ControlledRemote, SqliteDeploymentRepos
 #[derive(Clone, Default)]
 struct ControlledRemote {
     slow_task: Arc<Mutex<Option<String>>>,
+    failed_task: Arc<Mutex<Option<String>>>,
+    task_calls: Arc<Mutex<Vec<String>>>,
 }
 
 impl ControlledRemote {
     fn set_slow_task(&self, task: Option<&str>) {
         *self.slow_task.lock().expect("slow task lock poisoned") = task.map(str::to_owned);
+    }
+
+    fn set_failed_task(&self, task: Option<&str>) {
+        *self.failed_task.lock().expect("failed task lock poisoned") = task.map(str::to_owned);
+    }
+
+    fn task_calls(&self) -> Vec<String> {
+        self.task_calls
+            .lock()
+            .expect("task call lock poisoned")
+            .clone()
     }
 }
 
@@ -74,6 +87,10 @@ impl RemoteExecutionPort for ControlledRemote {
         task: &str,
         _parameters: BTreeMap<String, Value>,
     ) -> RemoteExecutionResult<RemoteTaskResult> {
+        self.task_calls
+            .lock()
+            .expect("task call lock poisoned")
+            .push(task.to_owned());
         let should_sleep = self
             .slow_task
             .lock()
@@ -83,11 +100,21 @@ impl RemoteExecutionPort for ControlledRemote {
         if should_sleep {
             tokio::time::sleep(Duration::from_millis(75)).await;
         }
+        let success = self
+            .failed_task
+            .lock()
+            .expect("failed task lock poisoned")
+            .as_deref()
+            != Some(task);
         Ok(RemoteTaskResult {
-            success: true,
-            exit_code: Some(0),
+            success,
+            exit_code: Some(if success { 0 } else { 1 }),
             stdout: String::new(),
-            stderr: String::new(),
+            stderr: if success {
+                String::new()
+            } else {
+                format!("{task} failed")
+            },
             duration_ms: 1,
             stdout_truncated: false,
             stderr_truncated: false,
@@ -192,6 +219,7 @@ async fn deployment_step_timeout_is_durable_and_respects_pre_mutation_boundary()
     assert_eq!(failure.step, DeploymentStep::BackupCurrent);
     assert_eq!(failure.code, ErrorCode::OperationTimedOut);
     assert!(result.outcome.rollback_failure.is_none());
+    assert_eq!(fixture.remote.task_calls(), vec!["demo-backup"]);
 
     let details = fixture
         .application
@@ -208,6 +236,125 @@ async fn deployment_step_timeout_is_durable_and_respects_pre_mutation_boundary()
         .as_deref()
         .unwrap_or_default()
         .contains("operation_timed_out"));
+}
+
+#[tokio::test]
+async fn post_mutation_step_timeout_keeps_durable_guard_and_does_not_start_rollback() {
+    let fixture = fixture(10, 1_000);
+    fixture.remote.set_slow_task(Some("demo-install"));
+
+    let result = fixture
+        .application
+        .deploy_application(deploy_request("1.0.0", &fixture.artifact_path))
+        .await
+        .unwrap();
+    assert_eq!(
+        result.outcome.deployment.state(),
+        DeploymentState::Installing
+    );
+    let failure = result.outcome.failure.as_ref().unwrap();
+    assert_eq!(failure.step, DeploymentStep::Install);
+    assert_eq!(failure.code, ErrorCode::OperationTimedOut);
+    assert!(failure.message.contains("remote completion is unknown"));
+    assert!(result.outcome.rollback_failure.is_none());
+    assert_eq!(
+        fixture.remote.task_calls(),
+        vec!["demo-backup", "demo-install"]
+    );
+
+    let details = fixture
+        .application
+        .get_deployment(result.outcome.deployment.id().as_str())
+        .unwrap();
+    assert_eq!(details.deployment.state(), DeploymentState::Installing);
+    let attempt = details
+        .step_attempts
+        .iter()
+        .find(|attempt| attempt.step == DeploymentStep::Install)
+        .unwrap();
+    assert_eq!(attempt.status, StepAttemptStatus::Failed);
+    assert!(attempt
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("operation_timed_out"));
+
+    let second = application_for_database(
+        Arc::clone(&fixture.config),
+        fixture.remote.clone(),
+        &fixture.database_path,
+    );
+    let conflict = second
+        .deploy_application(deploy_request("2.0.0", &fixture.artifact_path))
+        .await
+        .unwrap_err();
+    assert_eq!(conflict.code, ErrorCode::ConflictingDeployment);
+    assert_eq!(
+        fixture.remote.task_calls(),
+        vec!["demo-backup", "demo-install"]
+    );
+}
+
+#[tokio::test]
+async fn automatic_rollback_timeout_keeps_rolling_back_guard_and_stops_followup_tasks() {
+    let fixture = fixture(10, 1_000);
+    fixture.remote.set_failed_task(Some("demo-install"));
+    fixture.remote.set_slow_task(Some("demo-rollback"));
+
+    let result = fixture
+        .application
+        .deploy_application(deploy_request("1.0.0", &fixture.artifact_path))
+        .await
+        .unwrap();
+    assert_eq!(
+        result.outcome.deployment.state(),
+        DeploymentState::RollingBack
+    );
+    assert_eq!(
+        result.outcome.failure.as_ref().unwrap().code,
+        ErrorCode::RemoteExecutionFailed
+    );
+    let rollback_failure = result.outcome.rollback_failure.as_ref().unwrap();
+    assert_eq!(rollback_failure.code, ErrorCode::OperationTimedOut);
+    assert!(rollback_failure
+        .message
+        .contains("remote completion is unknown"));
+    assert_eq!(
+        fixture.remote.task_calls(),
+        vec!["demo-backup", "demo-install", "demo-rollback"]
+    );
+
+    let details = fixture
+        .application
+        .get_deployment(result.outcome.deployment.id().as_str())
+        .unwrap();
+    assert_eq!(details.deployment.state(), DeploymentState::RollingBack);
+}
+
+#[tokio::test]
+async fn verification_timeout_is_not_retried_and_keeps_verifying_guard() {
+    let fixture = fixture(10, 1_000);
+    fixture.remote.set_slow_task(Some("demo-health"));
+
+    let result = fixture
+        .application
+        .deploy_application(deploy_request("1.0.0", &fixture.artifact_path))
+        .await
+        .unwrap();
+    assert_eq!(result.outcome.deployment.state(), DeploymentState::Verifying);
+    assert_eq!(
+        result.outcome.failure.as_ref().unwrap().code,
+        ErrorCode::OperationTimedOut
+    );
+    assert_eq!(
+        fixture
+            .remote
+            .task_calls()
+            .iter()
+            .filter(|task| task.as_str() == "demo-health")
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
