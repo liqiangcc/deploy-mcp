@@ -112,8 +112,14 @@ fn request(path: &str) -> DeployRequest {
     }
 }
 
-fn assert_rejects_unknown_field<T: DeserializeOwned>(mut base: Map<String, Value>, field: &str) {
-    base.insert(field.to_owned(), Value::String("attacker-controlled".to_owned()));
+fn assert_rejects_unknown_field<T: DeserializeOwned + std::fmt::Debug>(
+    mut base: Map<String, Value>,
+    field: &str,
+) {
+    base.insert(
+        field.to_owned(),
+        Value::String("attacker-controlled".to_owned()),
+    );
     let error = serde_json::from_value::<T>(Value::Object(base)).unwrap_err();
     assert!(
         error.to_string().contains("unknown field"),
@@ -212,7 +218,12 @@ async fn artifact_outside_allowlist_is_rejected_before_remote_or_durable_work() 
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::ArtifactPathNotAllowed);
     assert!(remote.calls().is_empty());
-    assert!(repository.lock().unwrap().list_non_terminal().unwrap().is_empty());
+    assert!(repository
+        .lock()
+        .unwrap()
+        .list_non_terminal()
+        .unwrap()
+        .is_empty());
 }
 
 #[cfg(unix)]
@@ -242,7 +253,12 @@ async fn symlink_inside_allowlist_cannot_escape_before_remote_or_durable_work() 
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::ArtifactPathNotAllowed);
     assert!(remote.calls().is_empty());
-    assert!(repository.lock().unwrap().list_non_terminal().unwrap().is_empty());
+    assert!(repository
+        .lock()
+        .unwrap()
+        .list_non_terminal()
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -300,10 +316,15 @@ async fn deployment_remote_calls_are_derived_only_from_configured_capabilities()
         })
         .collect::<Vec<_>>();
     assert_eq!(
-        task_calls.iter().map(|(_, task, _)| *task).collect::<Vec<_>>(),
+        task_calls
+            .iter()
+            .map(|(_, task, _)| *task)
+            .collect::<Vec<_>>(),
         vec!["demo-backup", "demo-install", "demo-restart", "demo-health"]
     );
-    assert!(task_calls.iter().all(|(target, _, _)| *target == "test-server"));
+    assert!(task_calls
+        .iter()
+        .all(|(target, _, _)| *target == "test-server"));
 
     for (_, _, parameters) in &task_calls {
         for forbidden in [
