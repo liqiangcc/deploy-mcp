@@ -7,18 +7,19 @@
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
+use rusqlite::{params, Connection, ErrorCode, OptionalExtension, TransactionBehavior};
 
 use crate::domain::{
     ApplicationId, Artifact, Deployment, DeploymentId, DeploymentState, DeploymentStep,
     EnvironmentId,
 };
 use crate::ports::{
-    DeploymentRepository, DeploymentTransition, RepositoryError, RepositoryResult, StepAttemptId,
-    StepAttemptRecord, StepAttemptStatus,
+    DeploymentRepository, DeploymentReservation, DeploymentTransition, RepositoryError,
+    RepositoryResult, StepAttemptId, StepAttemptRecord, StepAttemptStatus,
 };
 
 const INITIAL_MIGRATION: &str = include_str!("../migrations/001_initial.sql");
+const IDENTITY_MIGRATION: &str = include_str!("../migrations/004_deployment_identity.sql");
 
 type DeploymentRow = (String, String, String, String, i64, String, String);
 
@@ -40,6 +41,9 @@ impl SqliteDeploymentRepository {
     fn from_connection(connection: Connection) -> RepositoryResult<Self> {
         connection
             .execute_batch(INITIAL_MIGRATION)
+            .map_err(storage_error)?;
+        connection
+            .execute_batch(IDENTITY_MIGRATION)
             .map_err(storage_error)?;
         Ok(Self { connection })
     }
@@ -81,6 +85,107 @@ impl DeploymentRepository for SqliteDeploymentRepository {
             }
             Err(error) => Err(storage_error(error)),
         }
+    }
+
+    fn reserve(
+        &mut self,
+        deployment: &Deployment,
+        idempotency_key: Option<&str>,
+    ) -> RepositoryResult<DeploymentReservation> {
+        let size = i64::try_from(deployment.artifact().size_bytes()).map_err(|_| {
+            RepositoryError::Storage("artifact size does not fit SQLite INTEGER".into())
+        })?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+
+        if let Some(key) = idempotency_key {
+            let existing = transaction
+                .query_row(
+                    "SELECT d.id, d.application_id, d.environment_id,
+                            d.artifact_version, d.artifact_size_bytes, d.artifact_sha256, d.state
+                     FROM deployment_idempotency i
+                     JOIN deployments d ON d.id = i.deployment_id
+                     WHERE i.idempotency_key = ?1",
+                    params![key],
+                    deployment_row,
+                )
+                .optional()
+                .map_err(storage_error)?;
+            if let Some(existing) = existing {
+                let existing = decode_deployment(existing)?;
+                if same_request_identity(&existing, deployment) {
+                    return Ok(DeploymentReservation::Reused(existing));
+                }
+                return Err(RepositoryError::IdempotencyConflict(key.to_owned()));
+            }
+        }
+
+        let version_conflict = transaction
+            .query_row(
+                "SELECT artifact_sha256, artifact_size_bytes
+                 FROM deployments
+                 WHERE application_id = ?1
+                   AND environment_id = ?2
+                   AND artifact_version = ?3
+                   AND (artifact_sha256 <> ?4 OR artifact_size_bytes <> ?5)
+                 LIMIT 1",
+                params![
+                    deployment.application().as_str(),
+                    deployment.environment().as_str(),
+                    deployment.artifact().version(),
+                    deployment.artifact().sha256(),
+                    size,
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(storage_error)?;
+        if let Some((existing_sha256, _)) = version_conflict {
+            return Err(RepositoryError::ArtifactVersionConflict {
+                application: deployment.application().as_str().to_owned(),
+                environment: deployment.environment().as_str().to_owned(),
+                version: deployment.artifact().version().to_owned(),
+                existing_sha256,
+                requested_sha256: deployment.artifact().sha256().to_owned(),
+            });
+        }
+
+        let now = now_unix_ms();
+        transaction
+            .execute(
+                "INSERT INTO deployments (
+                    id, application_id, environment_id,
+                    artifact_version, artifact_size_bytes, artifact_sha256,
+                    state, created_at_unix_ms, updated_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+                params![
+                    deployment.id().as_str(),
+                    deployment.application().as_str(),
+                    deployment.environment().as_str(),
+                    deployment.artifact().version(),
+                    size,
+                    deployment.artifact().sha256(),
+                    state_name(deployment.state()),
+                    now,
+                ],
+            )
+            .map_err(|error| reservation_insert_error(error, deployment))?;
+
+        if let Some(key) = idempotency_key {
+            transaction
+                .execute(
+                    "INSERT INTO deployment_idempotency (
+                        idempotency_key, deployment_id, created_at_unix_ms
+                     ) VALUES (?1, ?2, ?3)",
+                    params![key, deployment.id().as_str(), now],
+                )
+                .map_err(|error| idempotency_insert_error(error, key))?;
+        }
+
+        transaction.commit().map_err(storage_error)?;
+        Ok(DeploymentReservation::Created)
     }
 
     fn get(&self, id: &DeploymentId) -> RepositoryResult<Option<Deployment>> {
@@ -330,6 +435,49 @@ impl DeploymentRepository for SqliteDeploymentRepository {
     }
 }
 
+fn same_request_identity(existing: &Deployment, requested: &Deployment) -> bool {
+    existing.application() == requested.application()
+        && existing.environment() == requested.environment()
+        && existing.artifact().version() == requested.artifact().version()
+        && existing.artifact().size_bytes() == requested.artifact().size_bytes()
+        && existing.artifact().sha256() == requested.artifact().sha256()
+}
+
+fn reservation_insert_error(error: rusqlite::Error, deployment: &Deployment) -> RepositoryError {
+    match &error {
+        rusqlite::Error::SqliteFailure(sqlite, message)
+            if sqlite.code == ErrorCode::ConstraintViolation =>
+        {
+            let message = message.as_deref().unwrap_or_default();
+            if message.contains("mutation_conflict")
+                || message.contains("recovery_required")
+                || message.contains("deployments.application_id, deployments.environment_id")
+            {
+                RepositoryError::MutationConflict {
+                    application: deployment.application().as_str().to_owned(),
+                    environment: deployment.environment().as_str().to_owned(),
+                }
+            } else if message.contains("deployments.id") {
+                RepositoryError::AlreadyExists(deployment.id().as_str().to_owned())
+            } else {
+                storage_error(error)
+            }
+        }
+        _ => storage_error(error),
+    }
+}
+
+fn idempotency_insert_error(error: rusqlite::Error, key: &str) -> RepositoryError {
+    match &error {
+        rusqlite::Error::SqliteFailure(sqlite, _)
+            if sqlite.code == ErrorCode::ConstraintViolation =>
+        {
+            RepositoryError::IdempotencyConflict(key.to_owned())
+        }
+        _ => storage_error(error),
+    }
+}
+
 fn deployment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeploymentRow> {
     Ok((
         row.get(0)?,
@@ -463,6 +611,8 @@ mod tests {
     use tempfile::tempdir;
 
     const SHA256: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const OTHER_SHA256: &str =
+        "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
 
     fn deployment(id: &str) -> Deployment {
         Deployment::new(
@@ -600,5 +750,68 @@ mod tests {
             repository.create(&deployment).unwrap_err(),
             RepositoryError::AlreadyExists("d-duplicate".into())
         );
+    }
+
+    #[test]
+    fn idempotency_key_reuses_exact_deployment_across_repository_reopen() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("deployments.sqlite");
+        let first = deployment("d-first");
+        let mut repository = SqliteDeploymentRepository::open(&path).unwrap();
+        assert_eq!(
+            repository.reserve(&first, Some("request-1")).unwrap(),
+            DeploymentReservation::Created
+        );
+        drop(repository);
+
+        let mut reopened = SqliteDeploymentRepository::open(&path).unwrap();
+        let proposed = deployment("d-second");
+        let reused = reopened.reserve(&proposed, Some("request-1")).unwrap();
+        match reused {
+            DeploymentReservation::Reused(existing) => {
+                assert_eq!(existing.id().as_str(), "d-first");
+            }
+            DeploymentReservation::Created => panic!("exact replay must reuse deployment"),
+        }
+        assert_eq!(reopened.list(None, None, 50).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn idempotency_key_cannot_be_rebound_to_different_intent() {
+        let mut repository = SqliteDeploymentRepository::in_memory().unwrap();
+        repository
+            .reserve(&deployment("d-first"), Some("request-1"))
+            .unwrap();
+        let changed = Deployment::new(
+            DeploymentId::new("d-changed").unwrap(),
+            ApplicationId::new("other").unwrap(),
+            EnvironmentId::new("prod").unwrap(),
+            Artifact::new("2.0.0", 42, SHA256).unwrap(),
+        );
+        assert_eq!(
+            repository.reserve(&changed, Some("request-1")).unwrap_err(),
+            RepositoryError::IdempotencyConflict("request-1".to_owned())
+        );
+    }
+
+    #[test]
+    fn same_version_with_changed_checksum_is_rejected() {
+        let mut repository = SqliteDeploymentRepository::in_memory().unwrap();
+        repository
+            .reserve(&deployment("d-first"), Some("request-1"))
+            .unwrap();
+        let changed = Deployment::new(
+            DeploymentId::new("d-changed").unwrap(),
+            ApplicationId::new("demo").unwrap(),
+            EnvironmentId::new("test").unwrap(),
+            Artifact::new("1.0.0", 42, OTHER_SHA256).unwrap(),
+        );
+        let error = repository
+            .reserve(&changed, Some("request-2"))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            RepositoryError::ArtifactVersionConflict { .. }
+        ));
     }
 }
