@@ -60,7 +60,9 @@ fn exact_operator_acknowledgement_resolves_guard_and_is_durable() {
     let incident_id = create_manual_incident(&database);
 
     let mut deployments = SqliteDeploymentRepository::open(&database).unwrap();
-    assert!(deployments.create(&deployment("blocked-before-ack")).is_err());
+    assert!(deployments
+        .create(&deployment("blocked-before-ack"))
+        .is_err());
 
     let mut admin = RecoveryAdminService::new(SqliteRecoveryRepository::open(&database).unwrap());
     let unresolved = admin.unresolved_incidents().unwrap();
