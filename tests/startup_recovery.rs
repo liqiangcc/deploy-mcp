@@ -90,9 +90,8 @@ fn pre_mutation_interruption_is_failed_and_auto_resolved() {
         .start_step(interrupted.id(), DeploymentStep::BackupCurrent)
         .unwrap();
 
-    let mut recovery = StartupRecoveryService::new(
-        SqliteRecoveryRepository::open(&database).unwrap(),
-    );
+    let mut recovery =
+        StartupRecoveryService::new(SqliteRecoveryRepository::open(&database).unwrap());
     let report = recovery.recover().unwrap();
     assert_eq!(report.incidents().len(), 1);
     assert_eq!(
@@ -138,9 +137,8 @@ fn post_mutation_interruption_requires_manual_reconciliation_and_blocks_new_depl
         .start_step(interrupted.id(), DeploymentStep::Install)
         .unwrap();
 
-    let mut recovery = StartupRecoveryService::new(
-        SqliteRecoveryRepository::open(&database).unwrap(),
-    );
+    let mut recovery =
+        StartupRecoveryService::new(SqliteRecoveryRepository::open(&database).unwrap());
     let report = recovery.recover().unwrap();
     assert_eq!(report.manual_reconciliation_count(), 1);
     assert_eq!(
@@ -158,12 +156,13 @@ fn post_mutation_interruption_requires_manual_reconciliation_and_blocks_new_depl
         DeploymentState::Failed
     );
 
-    let error = deployments.create(&deployment("blocked-deploy")).unwrap_err();
+    let error = deployments
+        .create(&deployment("blocked-deploy"))
+        .unwrap_err();
     assert!(matches!(error, RepositoryError::AlreadyExists(_)));
 
-    let mut second_recovery = StartupRecoveryService::new(
-        SqliteRecoveryRepository::open(&database).unwrap(),
-    );
+    let mut second_recovery =
+        StartupRecoveryService::new(SqliteRecoveryRepository::open(&database).unwrap());
     assert!(second_recovery.recover().unwrap().incidents().is_empty());
     assert_eq!(second_recovery.unresolved_incidents().unwrap().len(), 1);
 }
@@ -188,9 +187,8 @@ fn interrupted_explicit_rollback_is_failed_but_keeps_reference_and_blocks_mutati
     );
     rollbacks.begin_operation(&operation).unwrap();
 
-    let mut recovery = StartupRecoveryService::new(
-        SqliteRecoveryRepository::open(&database).unwrap(),
-    );
+    let mut recovery =
+        StartupRecoveryService::new(SqliteRecoveryRepository::open(&database).unwrap());
     let report = recovery.recover().unwrap();
     assert_eq!(report.manual_reconciliation_count(), 1);
     assert_eq!(
@@ -198,10 +196,7 @@ fn interrupted_explicit_rollback_is_failed_but_keeps_reference_and_blocks_mutati
         RecoverySubjectKind::RollbackOperation
     );
 
-    let recovered_operation = rollbacks
-        .get_operation(operation.id())
-        .unwrap()
-        .unwrap();
+    let recovered_operation = rollbacks.get_operation(operation.id()).unwrap().unwrap();
     assert_eq!(recovered_operation.state(), RollbackOperationState::Failed);
     assert_eq!(
         rollbacks
@@ -221,6 +216,8 @@ fn interrupted_explicit_rollback_is_failed_but_keeps_reference_and_blocks_mutati
     let error = rollbacks.begin_operation(&retry).unwrap_err();
     assert!(matches!(error, RepositoryError::MutationConflict { .. }));
 
-    let error = deployments.create(&deployment("blocked-after-rollback")).unwrap_err();
+    let error = deployments
+        .create(&deployment("blocked-after-rollback"))
+        .unwrap_err();
     assert!(matches!(error, RepositoryError::AlreadyExists(_)));
 }
