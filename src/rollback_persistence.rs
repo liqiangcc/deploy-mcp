@@ -17,7 +17,8 @@ use crate::ports::{
 };
 
 const INITIAL_MIGRATION: &str = include_str!("../migrations/001_initial.sql");
-const RETENTION_MIGRATION: &str = include_str!("../migrations/005_rollback_reference_retention.sql");
+const RETENTION_MIGRATION: &str =
+    include_str!("../migrations/005_rollback_reference_retention.sql");
 
 type ReferenceRow = (
     String,
