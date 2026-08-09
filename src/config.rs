@@ -7,6 +7,7 @@ use serde::Deserialize;
 use crate::error::{AppError, AppResult, ErrorCode};
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub remote_exec: RemoteExecConfig,
     #[serde(default)]
@@ -17,6 +18,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteExecConfig {
     pub command: String,
     #[serde(default)]
@@ -24,6 +26,7 @@ pub struct RemoteExecConfig {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LocalArtifactConfig {
     #[serde(default)]
     pub allowed_roots: Vec<String>,
@@ -32,6 +35,7 @@ pub struct LocalArtifactConfig {
 const MAX_TIMEOUT_MS: u64 = 3_600_000;
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
     #[serde(default = "default_deployment_step_timeout_ms")]
     pub deployment_step_timeout_ms: u64,
@@ -85,6 +89,7 @@ const fn default_rollback_reference_cleanup_batch_size() -> u32 {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ApplicationConfig {
     pub display_name: Option<String>,
     pub artifact_type: ArtifactType,
@@ -98,6 +103,7 @@ pub enum ArtifactType {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EnvironmentConfig {
     pub target: String,
     pub staging_path: String,
@@ -107,6 +113,7 @@ pub struct EnvironmentConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaskReferences {
     pub precheck: Option<String>,
     pub backup: String,
@@ -345,6 +352,7 @@ mod tests {
 remote_exec:
   command: remote-exec-mcp
   args:
+    - --config
     - /etc/remote-exec/config.yaml
 local_artifacts:
   allowed_roots:
@@ -385,6 +393,43 @@ applications:
         );
         assert_eq!(config.runtime.rollback_reference_retention_days, 30);
         assert_eq!(config.runtime.rollback_reference_cleanup_batch_size, 500);
+    }
+
+    #[test]
+    fn rejects_unknown_configuration_fields_at_every_capability_boundary() {
+        let cases = [
+            VALID_CONFIG.replace("remote_exec:", "unexpected_top_level: true\nremote_exec:"),
+            VALID_CONFIG.replace(
+                "  command: remote-exec-mcp",
+                "  command: remote-exec-mcp\n  unexpected_remote_exec: true",
+            ),
+            VALID_CONFIG.replace(
+                "local_artifacts:",
+                "local_artifacts:\n  unexpected_local_artifact: true",
+            ),
+            VALID_CONFIG.replace(
+                "applications:",
+                "runtime:\n  deployment_step_timout_ms: 120000\napplications:",
+            ),
+            VALID_CONFIG.replace(
+                "    artifact_type: jar",
+                "    artifact_type: jar\n    unexpected_application: true",
+            ),
+            VALID_CONFIG.replace(
+                "        target: test-server",
+                "        target: test-server\n        unexpected_environment: true",
+            ),
+            VALID_CONFIG.replace(
+                "          restart: demo-restart",
+                "          restart: demo-restart\n          unexpected_task: true",
+            ),
+        ];
+
+        for raw in cases {
+            let error = Config::from_yaml(&raw).unwrap_err();
+            assert_eq!(error.code, ErrorCode::InvalidConfiguration);
+            assert!(error.message.contains("unknown field"), "{}", error.message);
+        }
     }
 
     #[test]
