@@ -2,11 +2,13 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
 use deploy_mcp::adapters::RemoteExecMcpAdapter;
-use deploy_mcp::application::{DeploymentApi, DeploymentApplication};
+use deploy_mcp::application::{DeploymentApi, DeploymentApplication, StartupRecoveryService};
 use deploy_mcp::config::Config;
+use deploy_mcp::domain::RecoveryDisposition;
 use deploy_mcp::mcp::DeployMcp;
 use deploy_mcp::persistence::SqliteDeploymentRepository;
 use deploy_mcp::ports::RollbackRepository;
+use deploy_mcp::recovery_persistence::SqliteRecoveryRepository;
 use deploy_mcp::rollback_persistence::SqliteRollbackRepository;
 use rmcp::{transport::stdio, ServiceExt};
 
@@ -22,6 +24,35 @@ async fn main() -> Result<()> {
         Config::load(&config_path)
             .with_context(|| format!("failed to load deploy-mcp config from {config_path}"))?,
     );
+
+    let mut recovery = StartupRecoveryService::new(
+        SqliteRecoveryRepository::open(&database_path)
+            .with_context(|| format!("failed to open recovery database at {database_path}"))?,
+    );
+    let recovery_report = recovery
+        .recover()
+        .context("failed to recover interrupted deployment/rollback records")?;
+    for incident in recovery_report.incidents() {
+        match incident.disposition() {
+            RecoveryDisposition::AutoResolved => tracing::warn!(
+                subject_kind = ?incident.subject_kind(),
+                subject_id = incident.subject_id(),
+                application = incident.application(),
+                environment = incident.environment(),
+                previous_state = incident.previous_state(),
+                "startup recovery safely failed interrupted pre-mutation orchestration"
+            ),
+            RecoveryDisposition::ManualReconciliationRequired => tracing::error!(
+                subject_kind = ?incident.subject_kind(),
+                subject_id = incident.subject_id(),
+                application = incident.application(),
+                environment = incident.environment(),
+                previous_state = incident.previous_state(),
+                "startup recovery requires manual reconciliation; environment remains mutation-blocked"
+            ),
+        }
+    }
+
     let repository = Arc::new(Mutex::new(
         SqliteDeploymentRepository::open(&database_path)
             .with_context(|| format!("failed to open deployment database at {database_path}"))?,

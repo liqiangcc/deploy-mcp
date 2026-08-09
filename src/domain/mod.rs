@@ -1,5 +1,6 @@
 mod deployment;
 mod plan;
+mod recovery;
 mod rollback;
 
 pub use deployment::{
@@ -7,6 +8,7 @@ pub use deployment::{
     EnvironmentId,
 };
 pub use plan::{DeploymentPlan, DeploymentStep, RollbackBoundary};
+pub use recovery::{RecoveryDisposition, RecoveryIncident, RecoverySubjectKind};
 pub use rollback::{
     RollbackError, RollbackOperation, RollbackOperationId, RollbackOperationState,
     RollbackReference, RollbackReferenceState,

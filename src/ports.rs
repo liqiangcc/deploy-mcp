@@ -10,8 +10,9 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::domain::{
-    Deployment, DeploymentId, DeploymentState, DeploymentStep, RollbackOperation,
-    RollbackOperationId, RollbackOperationState, RollbackReference,
+    Deployment, DeploymentId, DeploymentState, DeploymentStep, RecoveryDisposition,
+    RecoveryIncident, RollbackOperation, RollbackOperationId, RollbackOperationState,
+    RollbackReference,
 };
 
 pub type RemoteExecutionResult<T> = Result<T, RemoteExecutionError>;
@@ -155,6 +156,26 @@ pub trait RollbackRepository: Send {
         &self,
         operation_id: &RollbackOperationId,
     ) -> RepositoryResult<Option<RollbackOperation>>;
+}
+
+/// Durable recovery persistence is intentionally separate from normal deployment
+/// and rollback repositories. Startup recovery is an administrative safety path,
+/// not another branch in the deployment state machine.
+pub trait RecoveryRepository: Send {
+    fn interrupted_deployments(&self) -> RepositoryResult<Vec<Deployment>>;
+    fn started_rollback_operations(&self) -> RepositoryResult<Vec<RollbackOperation>>;
+    fn recover_deployment(
+        &mut self,
+        deployment: &Deployment,
+        disposition: RecoveryDisposition,
+        reason: &str,
+    ) -> RepositoryResult<Option<RecoveryIncident>>;
+    fn recover_rollback_operation(
+        &mut self,
+        operation: &RollbackOperation,
+        reason: &str,
+    ) -> RepositoryResult<Option<RecoveryIncident>>;
+    fn unresolved_incidents(&self) -> RepositoryResult<Vec<RecoveryIncident>>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

@@ -11,4 +11,5 @@ pub mod error;
 pub mod mcp;
 pub mod persistence;
 pub mod ports;
+pub mod recovery_persistence;
 pub mod rollback_persistence;
