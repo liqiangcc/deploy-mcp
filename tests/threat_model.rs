@@ -20,15 +20,43 @@ const STAGING_PATH: &str = "/opt/staging/demo.jar";
 const INSTALL_PATH: &str = "/opt/apps/demo/demo.jar";
 const BACKUP_PATH: &str = "/opt/apps/demo/backup/demo.jar";
 
-fn config(artifact_root: &str) -> Arc<Config> {
-    Arc::new(
-        Config::from_yaml(&format!(
-            r#"
+fn config_yaml(artifact_root: &str) -> String {
+    format!(
+        r#"
 remote_exec:
   command: remote-exec-mcp
 local_artifacts:
   allowed_roots:
     - {artifact_root}
+applications:
+  demo:
+    artifact_type: jar
+    environments:
+      test:
+        target: test-server
+        staging_path: {STAGING_PATH}
+        install_path: {INSTALL_PATH}
+        backup_path: {BACKUP_PATH}
+        tasks:
+          backup: demo-backup
+          install: demo-install
+          restart: demo-restart
+          health_check: demo-health
+          rollback: demo-rollback
+"#
+    )
+}
+
+fn config(artifact_root: &str) -> Arc<Config> {
+    Arc::new(Config::from_yaml(&config_yaml(artifact_root)).unwrap())
+}
+
+fn config_without_local_artifact_capability() -> Arc<Config> {
+    Arc::new(
+        Config::from_yaml(&format!(
+            r#"
+remote_exec:
+  command: remote-exec-mcp
 applications:
   demo:
     artifact_type: jar
@@ -194,6 +222,42 @@ fn ai_facing_read_schemas_do_not_accept_remote_execution_controls() {
         assert_rejects_unknown_field::<GetDeploymentHistoryArgs>(history.clone(), field);
         assert_rejects_unknown_field::<ListDeploymentsArgs>(list.clone(), field);
     }
+}
+
+#[test]
+fn unsafe_artifact_capability_roots_are_rejected_at_configuration_boundary() {
+    for root in ["relative/artifacts", "/", "/tmp/../etc"] {
+        let error = Config::from_yaml(&config_yaml(root)).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfiguration, "root={root}");
+    }
+}
+
+#[tokio::test]
+async fn missing_local_artifact_capability_denies_before_remote_or_durable_work() {
+    let directory = tempfile::tempdir().unwrap();
+    let artifact = directory.path().join("demo.jar");
+    std::fs::write(&artifact, b"jar-content").unwrap();
+
+    let remote = FakeRemoteExecution::default();
+    let repository = Arc::new(Mutex::new(SqliteDeploymentRepository::in_memory().unwrap()));
+    let service = DeployService::new(
+        config_without_local_artifact_capability(),
+        Arc::new(remote.clone()),
+        Arc::clone(&repository),
+    );
+
+    let error = service
+        .deploy(request(&artifact.to_string_lossy()))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::ArtifactPathNotAllowed);
+    assert!(remote.calls().is_empty());
+    assert!(repository
+        .lock()
+        .unwrap()
+        .list_non_terminal()
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
