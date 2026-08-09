@@ -1067,7 +1067,9 @@ applications:
         assert!(validate_idempotency_key(None).is_ok());
         assert!(validate_idempotency_key(Some("request-123")).is_ok());
         assert_eq!(
-            validate_idempotency_key(Some(" request-123")).unwrap_err().code,
+            validate_idempotency_key(Some(" request-123"))
+                .unwrap_err()
+                .code,
             ErrorCode::InvalidRequest
         );
         assert_eq!(
