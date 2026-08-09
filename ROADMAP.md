@@ -187,8 +187,8 @@ Acceptance criteria:
 - [x] rollback-reference retention/cleanup policy
 - [x] local artifact-path allowlist
 - [x] threat-model regression tests
-- [ ] disposable integration test using a real remote-exec-mcp process or equivalent protocol fixture
-- [ ] README/config/client setup documentation
+- [x] disposable integration test using a real remote-exec-mcp process or equivalent protocol fixture
+- [x] README/config/client setup documentation
 
 Deployment identity acceptance criteria:
 
