@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, Transaction};
 
 use crate::domain::{
     ApplicationId, Artifact, Deployment, DeploymentId, DeploymentState, EnvironmentId,
