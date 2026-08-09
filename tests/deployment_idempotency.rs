@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use deploy_mcp::adapters::FakeRemoteExecution;
@@ -10,6 +11,9 @@ use deploy_mcp::ports::{RemoteTargetCheck, RemoteTaskResult, RemoteTransferResul
 const CONFIG: &str = r#"
 remote_exec:
   command: remote-exec-mcp
+local_artifacts:
+  allowed_roots:
+    - __LOCAL_ARTIFACT_ROOT__
 applications:
   demo:
     artifact_type: jar
@@ -26,6 +30,11 @@ applications:
           health_check: demo-health
           rollback: demo-rollback
 "#;
+
+fn config(root: &Path) -> Arc<Config> {
+    let root = serde_json::to_string(root.to_string_lossy().as_ref()).unwrap();
+    Arc::new(Config::from_yaml(&CONFIG.replace("__LOCAL_ARTIFACT_ROOT__", &root)).unwrap())
+}
 
 fn success_task() -> RemoteTaskResult {
     RemoteTaskResult {
@@ -61,9 +70,13 @@ fn configured_remote(artifact_path: &str, size: u64) -> FakeRemoteExecution {
         .map(str::to_owned)
         .collect()),
     );
+    let canonical_artifact = std::fs::canonicalize(artifact_path)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     fake.set_upload_result(
         "test-server",
-        artifact_path,
+        &canonical_artifact,
         "/opt/staging/demo.jar",
         true,
         Ok(RemoteTransferResult {
@@ -104,11 +117,7 @@ async fn exact_idempotent_replay_returns_same_deployment_without_remote_work() {
     let repository = Arc::new(Mutex::new(
         SqliteDeploymentRepository::open(&database).unwrap(),
     ));
-    let service = DeployService::new(
-        Arc::new(Config::from_yaml(CONFIG).unwrap()),
-        Arc::new(fake.clone()),
-        repository,
-    );
+    let service = DeployService::new(config(directory.path()), Arc::new(fake.clone()), repository);
 
     let first = service
         .deploy(request(&artifact, "1.2.3", "release-123"))
@@ -139,11 +148,7 @@ async fn same_key_with_changed_intent_is_rejected_before_remote_work() {
     let repository = Arc::new(Mutex::new(
         SqliteDeploymentRepository::open(&database).unwrap(),
     ));
-    let service = DeployService::new(
-        Arc::new(Config::from_yaml(CONFIG).unwrap()),
-        Arc::new(fake.clone()),
-        repository,
-    );
+    let service = DeployService::new(config(directory.path()), Arc::new(fake.clone()), repository);
 
     service
         .deploy(request(&artifact, "1.2.3", "release-123"))
@@ -174,11 +179,7 @@ async fn same_version_with_changed_artifact_is_rejected_before_remote_work() {
     let repository = Arc::new(Mutex::new(
         SqliteDeploymentRepository::open(&database).unwrap(),
     ));
-    let service = DeployService::new(
-        Arc::new(Config::from_yaml(CONFIG).unwrap()),
-        Arc::new(fake.clone()),
-        repository,
-    );
+    let service = DeployService::new(config(directory.path()), Arc::new(fake.clone()), repository);
 
     service
         .deploy(request(&first_artifact, "1.2.3", "release-a"))
