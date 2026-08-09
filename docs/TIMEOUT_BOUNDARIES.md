@@ -14,7 +14,14 @@ The timeout is applied by the deployment application layer to:
 - artifact staging upload;
 - configured named tasks, including automatic rollback restore/restart/verification.
 
-A timed-out step is durably completed as `FAILED` with stable code `operation_timed_out`. Existing mutation semantics remain authoritative: pre-mutation failures stop without rollback, while install/restart/verification failures enter the normal automatic rollback path.
+A timed-out step attempt is durably completed as `FAILED` with stable code `operation_timed_out`. The orchestration state consequence depends on whether live remote mutation may already have started:
+
+- `PRECHECK`, staging, and backup timeout before the live `INSTALL` boundary can terminate the deployment as `FAILED`;
+- `INSTALL`, `RESTART`, or `VERIFY` timeout does **not** immediately start automatic rollback, because the timed-out remote action may still complete after deploy-mcp stopped waiting;
+- a post-mutation timeout therefore leaves the deployment in its current non-terminal state (`INSTALLING`, `RESTARTING`, or `VERIFYING`) so the existing durable active-deployment guard blocks later mutation until startup recovery/manual reconciliation;
+- if an automatic rollback restore/restart/verification step itself times out, the deployment remains `ROLLING_BACK` rather than being claimed as `ROLLBACK_FAILED`.
+
+Ordinary non-timeout install/restart/verification failures still use the existing automatic rollback policy. A verification timeout is also not retried: deterministic verification retries are reserved for completed health-check attempts that explicitly report failure. Timeout proves only that the local deadline expired, not that the remote action stopped or failed.
 
 ## Explicit rollback-operation timeout
 
