@@ -104,8 +104,22 @@ pub struct StepAttemptRecord {
     pub finished_at_unix_ms: Option<i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeploymentReservation {
+    Created,
+    Reused(Deployment),
+}
+
 pub trait DeploymentRepository {
     fn create(&mut self, deployment: &Deployment) -> RepositoryResult<()>;
+    fn reserve(
+        &mut self,
+        deployment: &Deployment,
+        idempotency_key: Option<&str>,
+    ) -> RepositoryResult<DeploymentReservation> {
+        self.create(deployment)?;
+        Ok(DeploymentReservation::Created)
+    }
     fn get(&self, id: &DeploymentId) -> RepositoryResult<Option<Deployment>>;
     fn list(
         &self,
@@ -199,6 +213,18 @@ pub enum RepositoryError {
     StateConflict {
         deployment_id: String,
         expected: DeploymentState,
+    },
+    #[error("idempotency key conflict: {0}")]
+    IdempotencyConflict(String),
+    #[error(
+        "artifact version conflict for {application}/{environment} version {version}: existing={existing_sha256}, requested={requested_sha256}"
+    )]
+    ArtifactVersionConflict {
+        application: String,
+        environment: String,
+        version: String,
+        existing_sha256: String,
+        requested_sha256: String,
     },
     #[error("rollback is unavailable: {0}")]
     RollbackUnavailable(String),
