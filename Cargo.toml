@@ -6,8 +6,9 @@ description = "A deployment-orchestration MCP that composes safe remote executio
 license = "MIT"
 
 [dependencies]
+anyhow = "1"
 async-trait = "0.1"
-rmcp = { version = "2.2", features = ["client", "transport-child-process"] }
+rmcp = { version = "2.2", features = ["client", "transport-child-process", "server", "transport-io", "schemars"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -15,6 +16,8 @@ serde_yaml = "0.9"
 sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]

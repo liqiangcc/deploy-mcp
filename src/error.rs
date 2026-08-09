@@ -9,8 +9,10 @@ pub type AppResult<T> = Result<T, AppError>;
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     InvalidConfiguration,
+    InvalidRequest,
     UnknownApplication,
     UnknownEnvironment,
+    UnknownDeployment,
     InvalidVersion,
     InvalidArtifact,
     ArtifactNotFound,
@@ -30,8 +32,10 @@ impl ErrorCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::InvalidConfiguration => "invalid_configuration",
+            Self::InvalidRequest => "invalid_request",
             Self::UnknownApplication => "unknown_application",
             Self::UnknownEnvironment => "unknown_environment",
+            Self::UnknownDeployment => "unknown_deployment",
             Self::InvalidVersion => "invalid_version",
             Self::InvalidArtifact => "invalid_artifact",
             Self::ArtifactNotFound => "artifact_not_found",
@@ -83,8 +87,10 @@ mod tests {
     fn error_codes_are_stable() {
         let expected = [
             (ErrorCode::InvalidConfiguration, "invalid_configuration"),
+            (ErrorCode::InvalidRequest, "invalid_request"),
             (ErrorCode::UnknownApplication, "unknown_application"),
             (ErrorCode::UnknownEnvironment, "unknown_environment"),
+            (ErrorCode::UnknownDeployment, "unknown_deployment"),
             (ErrorCode::InvalidVersion, "invalid_version"),
             (ErrorCode::InvalidArtifact, "invalid_artifact"),
             (ErrorCode::ArtifactNotFound, "artifact_not_found"),

@@ -99,6 +99,35 @@ impl DeploymentRepository for SqliteDeploymentRepository {
         row.map(decode_deployment).transpose()
     }
 
+    fn list(
+        &self,
+        application: Option<&str>,
+        environment: Option<&str>,
+        limit: usize,
+    ) -> RepositoryResult<Vec<Deployment>> {
+        let limit = i64::try_from(limit)
+            .map_err(|_| RepositoryError::Storage("deployment list limit is too large".into()))?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, application_id, environment_id,
+                        artifact_version, artifact_size_bytes, artifact_sha256, state
+                 FROM deployments
+                 WHERE (?1 IS NULL OR application_id = ?1)
+                   AND (?2 IS NULL OR environment_id = ?2)
+                 ORDER BY created_at_unix_ms DESC, id DESC
+                 LIMIT ?3",
+            )
+            .map_err(storage_error)?;
+
+        let rows = statement
+            .query_map(params![application, environment, limit], deployment_row)
+            .map_err(storage_error)?;
+
+        rows.map(|row| row.map_err(storage_error).and_then(decode_deployment))
+            .collect()
+    }
+
     fn list_non_terminal(&self) -> RepositoryResult<Vec<Deployment>> {
         let mut statement = self
             .connection
@@ -480,6 +509,29 @@ mod tests {
         assert_eq!(restored.state(), DeploymentState::Installing);
         assert_eq!(repository.list_non_terminal().unwrap().len(), 1);
         assert_eq!(repository.transitions(&id).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn list_filters_and_returns_recent_deployments() {
+        let mut repository = SqliteDeploymentRepository::in_memory().unwrap();
+        repository.create(&deployment("d1")).unwrap();
+        repository.create(&Deployment::new(
+            DeploymentId::new("d2").unwrap(),
+            ApplicationId::new("other").unwrap(),
+            EnvironmentId::new("prod").unwrap(),
+            Artifact::new("2.0.0", 42, SHA256).unwrap(),
+        )).unwrap();
+
+        assert_eq!(repository.list(Some("demo"), None, 50).unwrap().len(), 1);
+        assert_eq!(repository.list(None, None, 1).unwrap().len(), 1);
+        assert_eq!(
+            repository
+                .list(Some("other"), Some("prod"), 50)
+                .unwrap()[0]
+                .id()
+                .as_str(),
+            "d2"
+        );
     }
 
     #[test]

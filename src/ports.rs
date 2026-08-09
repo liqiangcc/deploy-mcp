@@ -110,6 +110,13 @@ pub trait DeploymentRepository {
 
     fn get(&self, id: &DeploymentId) -> RepositoryResult<Option<Deployment>>;
 
+    fn list(
+        &self,
+        application: Option<&str>,
+        environment: Option<&str>,
+        limit: usize,
+    ) -> RepositoryResult<Vec<Deployment>>;
+
     fn list_non_terminal(&self) -> RepositoryResult<Vec<Deployment>>;
 
     /// Atomically move the durable state and append the matching history row.
