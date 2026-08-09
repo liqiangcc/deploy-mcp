@@ -10,8 +10,8 @@ use crate::config::{ArtifactType, Config};
 use crate::domain::{Deployment, DeploymentId, DeploymentState, RollbackReference};
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::ports::{
-    DeploymentRepository, DeploymentTransition, RemoteExecutionPort, RepositoryError,
-    RepositoryResult, RollbackRepository, StepAttemptRecord,
+    AuditEvent, AuditRepository, DeploymentRepository, DeploymentTransition, RemoteExecutionPort,
+    RepositoryError, RepositoryResult, RollbackRepository, StepAttemptRecord,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +50,11 @@ pub trait DeploymentApi: Send + Sync {
         environment: Option<&str>,
         limit: usize,
     ) -> AppResult<Vec<DeploymentDetails>>;
+    fn get_deployment_history(
+        &self,
+        deployment_id: &str,
+        limit: usize,
+    ) -> AppResult<Vec<AuditEvent>>;
     async fn rollback_deployment(&self, deployment_id: &str) -> AppResult<RollbackOutcome>;
 }
 
@@ -63,6 +68,7 @@ where
     rollback: RollbackService<R, D>,
     repository: Arc<Mutex<D>>,
     rollback_repository: Arc<Mutex<Box<dyn RollbackRepository + Send>>>,
+    audit_repository: Option<Arc<dyn AuditRepository>>,
 }
 
 impl<R, D> DeploymentApplication<R, D>
@@ -96,7 +102,13 @@ where
             rollback,
             repository,
             rollback_repository,
+            audit_repository: None,
         }
+    }
+
+    pub fn with_audit_repository(mut self, audit_repository: Arc<dyn AuditRepository>) -> Self {
+        self.audit_repository = Some(audit_repository);
+        self
     }
 
     fn repository<T>(&self, operation: impl FnOnce(&D) -> RepositoryResult<T>) -> AppResult<T> {
@@ -120,6 +132,19 @@ where
             )
         })?;
         operation(repository.as_mut()).map_err(repository_error)
+    }
+
+    fn audit_repository<T>(
+        &self,
+        operation: impl FnOnce(&dyn AuditRepository) -> RepositoryResult<T>,
+    ) -> AppResult<T> {
+        let repository = self.audit_repository.as_deref().ok_or_else(|| {
+            AppError::new(
+                ErrorCode::PersistenceFailed,
+                "structured audit repository is not configured",
+            )
+        })?;
+        operation(repository).map_err(repository_error)
     }
 
     fn details(&self, deployment: Deployment) -> AppResult<DeploymentDetails> {
@@ -274,6 +299,32 @@ where
             .collect()
     }
 
+    fn get_deployment_history(
+        &self,
+        deployment_id: &str,
+        limit: usize,
+    ) -> AppResult<Vec<AuditEvent>> {
+        if limit == 0 || limit > 500 {
+            return Err(AppError::new(
+                ErrorCode::InvalidRequest,
+                "get_deployment_history limit must be between 1 and 500",
+            ));
+        }
+        let id = DeploymentId::new(deployment_id.to_owned()).map_err(|_| {
+            AppError::new(
+                ErrorCode::UnknownDeployment,
+                format!("unknown deployment: {deployment_id}"),
+            )
+        })?;
+        if self.repository(|repository| repository.get(&id))?.is_none() {
+            return Err(AppError::new(
+                ErrorCode::UnknownDeployment,
+                format!("unknown deployment: {deployment_id}"),
+            ));
+        }
+        self.audit_repository(|repository| repository.events_for_deployment(&id, limit))
+    }
+
     async fn rollback_deployment(&self, deployment_id: &str) -> AppResult<RollbackOutcome> {
         self.rollback
             .rollback(RollbackRequest {
@@ -401,6 +452,37 @@ applications:
                 .unwrap_err()
                 .code,
             ErrorCode::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn history_query_is_bounded_and_requires_a_configured_projection() {
+        let application = application();
+        let deployment = Deployment::new(
+            DeploymentId::new("d-history").unwrap(),
+            ApplicationId::new("demo").unwrap(),
+            EnvironmentId::new("test").unwrap(),
+            Artifact::new("1.0.0", 42, SHA256).unwrap(),
+        );
+        application
+            .repository
+            .lock()
+            .unwrap()
+            .create(&deployment)
+            .unwrap();
+        assert_eq!(
+            application
+                .get_deployment_history("d-history", 0)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            application
+                .get_deployment_history("d-history", 100)
+                .unwrap_err()
+                .code,
+            ErrorCode::PersistenceFailed
         );
     }
 }
