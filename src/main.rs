@@ -73,13 +73,8 @@ async fn main() -> Result<()> {
             .context("failed to start remote-exec-mcp child process")?,
     );
     let application: Arc<dyn DeploymentApi> = Arc::new(
-        DeploymentApplication::new(
-            Arc::clone(&config),
-            remote,
-            repository,
-            rollback_repository,
-        )
-        .with_audit_repository(audit_repository),
+        DeploymentApplication::new(Arc::clone(&config), remote, repository, rollback_repository)
+            .with_audit_repository(audit_repository),
     );
 
     let service = DeployMcp::new(application).serve(stdio()).await?;
