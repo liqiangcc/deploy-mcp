@@ -139,11 +139,9 @@ where
 
         self.reject_durable_conflict(&request.application, &request.environment)?;
 
-        let artifact_path = resolve_allowed_artifact_path(
-            &self.config.local_artifacts,
-            &request.artifact_path,
-        )
-        .await?;
+        let artifact_path =
+            resolve_allowed_artifact_path(&self.config.local_artifacts, &request.artifact_path)
+                .await?;
         let artifact = load_artifact(&request.version, &artifact_path).await?;
         let deployment_id = DeploymentId::new(Uuid::new_v4().to_string()).map_err(|error| {
             AppError::new(
@@ -947,9 +945,7 @@ applications:
     }
 
     fn config_with_root(root: &str) -> Arc<Config> {
-        Arc::new(
-            Config::from_yaml(&CONFIG.replace("__TEST_ARTIFACT_ROOT__", root)).unwrap(),
-        )
+        Arc::new(Config::from_yaml(&CONFIG.replace("__TEST_ARTIFACT_ROOT__", root)).unwrap())
     }
 
     fn config() -> Arc<Config> {
@@ -1147,7 +1143,11 @@ applications:
         let artifact_path = artifact_path.to_string_lossy().into_owned();
         let fake = FakeRemoteExecution::default();
         let root = allowed.path().to_string_lossy().into_owned();
-        let service = DeployService::new(config_with_root(&root), Arc::new(fake.clone()), repository());
+        let service = DeployService::new(
+            config_with_root(&root),
+            Arc::new(fake.clone()),
+            repository(),
+        );
 
         let error = service.deploy(request(&artifact_path)).await.unwrap_err();
         assert_eq!(error.code, ErrorCode::ArtifactPathNotAllowed);
