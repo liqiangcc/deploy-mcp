@@ -118,12 +118,16 @@ struct Fixture {
     application: Application,
 }
 
-fn config(max_attempts: u32, retry_delay_ms: u64) -> Arc<Config> {
+fn config(max_attempts: u32, retry_delay_ms: u64, artifact_root: &Path) -> Arc<Config> {
+    let artifact_root = serde_json::to_string(artifact_root.to_string_lossy().as_ref()).unwrap();
     Arc::new(
         Config::from_yaml(&format!(
             r#"
 remote_exec:
   command: remote-exec-mcp
+local_artifacts:
+  allowed_roots:
+    - {artifact_root}
 runtime:
   deployment_step_timeout_ms: 1000
   explicit_rollback_timeout_ms: 5000
@@ -172,8 +176,11 @@ fn fixture(max_attempts: u32) -> Fixture {
     fs::write(&artifact, bytes).unwrap();
     let artifact_path = artifact.to_string_lossy().into_owned();
     let remote = SequencedRemote::new(bytes.len() as u64);
-    let application =
-        application_for_database(config(max_attempts, 0), remote.clone(), &database_path);
+    let application = application_for_database(
+        config(max_attempts, 0, directory.path()),
+        remote.clone(),
+        &database_path,
+    );
     Fixture {
         _directory: directory,
         database_path,
