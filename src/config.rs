@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path};
 
 use serde::Deserialize;
 
@@ -9,6 +9,8 @@ use crate::error::{AppError, AppResult, ErrorCode};
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub remote_exec: RemoteExecConfig,
+    #[serde(default)]
+    pub local_artifacts: LocalArtifactConfig,
     #[serde(default)]
     pub runtime: RuntimeConfig,
     pub applications: BTreeMap<String, ApplicationConfig>,
@@ -19,6 +21,12 @@ pub struct RemoteExecConfig {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LocalArtifactConfig {
+    #[serde(default)]
+    pub allowed_roots: Vec<String>,
 }
 
 const MAX_TIMEOUT_MS: u64 = 3_600_000;
@@ -134,6 +142,7 @@ impl Config {
         for (index, argument) in self.remote_exec.args.iter().enumerate() {
             validate_process_value(&format!("remote_exec.args[{index}]"), argument)?;
         }
+        validate_local_artifact_roots(&self.local_artifacts.allowed_roots)?;
         validate_timeout(
             "runtime.deployment_step_timeout_ms",
             self.runtime.deployment_step_timeout_ms,
@@ -238,6 +247,38 @@ fn validate_absolute_path(kind: &str, value: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn validate_local_artifact_roots(roots: &[String]) -> AppResult<()> {
+    const MAX_ROOTS: usize = 32;
+    if roots.len() > MAX_ROOTS {
+        return Err(AppError::invalid_configuration(format!(
+            "local_artifacts.allowed_roots must contain at most {MAX_ROOTS} entries"
+        )));
+    }
+    for root in roots {
+        validate_reference("local artifact allowed root", root)?;
+        let path = Path::new(root);
+        if !path.is_absolute() {
+            return Err(AppError::invalid_configuration(format!(
+                "local artifact allowed root must be absolute: {root}"
+            )));
+        }
+        if path.parent().is_none() {
+            return Err(AppError::invalid_configuration(format!(
+                "local artifact allowed root must not be a filesystem root: {root}"
+            )));
+        }
+        if path
+            .components()
+            .any(|component| component == Component::ParentDir)
+        {
+            return Err(AppError::invalid_configuration(format!(
+                "local artifact allowed root must not contain '..': {root}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_process_value(kind: &str, value: &str) -> AppResult<()> {
     if value.contains('\0') {
         return Err(AppError::invalid_configuration(format!(
@@ -305,6 +346,9 @@ remote_exec:
   command: remote-exec-mcp
   args:
     - /etc/remote-exec/config.yaml
+local_artifacts:
+  allowed_roots:
+    - /var/lib/deploy-mcp/artifacts
 applications:
   demo-service:
     display_name: Demo Service
@@ -329,6 +373,10 @@ applications:
         let config = Config::from_yaml(VALID_CONFIG).unwrap();
         let environment = config.environment("demo-service", "test").unwrap();
         assert_eq!(config.remote_exec.command, "remote-exec-mcp");
+        assert_eq!(
+            config.local_artifacts.allowed_roots,
+            vec!["/var/lib/deploy-mcp/artifacts"]
+        );
         assert_eq!(environment.target, "test-server");
         assert_eq!(environment.tasks.restart, "demo-restart");
         assert_eq!(
@@ -364,6 +412,40 @@ applications:
         let error = Config::from_yaml(&raw).unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidConfiguration);
         assert!(error.message.contains("restart task must not be empty"));
+    }
+
+    #[test]
+    fn rejects_unsafe_local_artifact_roots() {
+        let relative = VALID_CONFIG.replace(
+            "/var/lib/deploy-mcp/artifacts",
+            "relative/artifacts",
+        );
+        let error = Config::from_yaml(&relative).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfiguration);
+        assert!(error.message.contains("allowed root must be absolute"));
+
+        let filesystem_root = VALID_CONFIG.replace("/var/lib/deploy-mcp/artifacts", "/");
+        let error = Config::from_yaml(&filesystem_root).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfiguration);
+        assert!(error.message.contains("must not be a filesystem root"));
+
+        let traversal = VALID_CONFIG.replace(
+            "/var/lib/deploy-mcp/artifacts",
+            "/var/lib/deploy-mcp/../artifacts",
+        );
+        let error = Config::from_yaml(&traversal).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfiguration);
+        assert!(error.message.contains("must not contain '..'"));
+    }
+
+    #[test]
+    fn missing_local_artifact_policy_is_fail_closed_at_deploy_time() {
+        let raw = VALID_CONFIG.replace(
+            "local_artifacts:\n  allowed_roots:\n    - /var/lib/deploy-mcp/artifacts\n",
+            "",
+        );
+        let config = Config::from_yaml(&raw).unwrap();
+        assert!(config.local_artifacts.allowed_roots.is_empty());
     }
 
     #[test]
