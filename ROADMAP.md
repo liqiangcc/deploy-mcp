@@ -184,7 +184,7 @@ Acceptance criteria:
 - [x] deployment-level structured audit/history
 - [x] timeouts at deployment-step and explicit-rollback-operation level
 - [x] deterministic verification retry policy
-- [ ] rollback-reference retention/cleanup policy
+- [x] rollback-reference retention/cleanup policy
 - [ ] local artifact-path allowlist
 - [ ] threat-model regression tests
 - [ ] disposable integration test using a real remote-exec-mcp process or equivalent protocol fixture
@@ -214,6 +214,17 @@ Structured audit/history acceptance criteria:
 - the projection survives SQLite connection/process reopen because it reconstructs from committed durable source facts rather than process-local logs;
 - same-millisecond events are deterministically ordered for rendering, but the tie-break order is not treated as additional causal/state-machine semantics;
 - a dedicated cross-repository test proves deployment -> rollback STARTED -> crash recovery -> manual incident -> operator acknowledgement -> database reopen as one recoverable structured timeline.
+
+Rollback-reference retention acceptance criteria:
+
+- retention is a maintenance-only application/persistence concern behind `RollbackRetentionRepository`; it has no `RemoteExecutionPort` dependency and performs no remote inspection or mutation;
+- `rollback_reference_retention_days` is bounded to `1..=3650` days and `rollback_reference_cleanup_batch_size` is bounded to `1..=5000`, with deterministic defaults of 30 days and 500 references per startup;
+- only `superseded` and `consumed` references older than the cutoff are eligible; `active` references are never pruned, including the retryable reference preserved after a failed explicit rollback;
+- cleanup is deterministic and bounded: oldest eligible references are selected first by `updated_at_unix_ms` and `deployment_id`, with later startups handling any remaining backlog;
+- pruning atomically records a durable retention marker and clears the executable target/path/task snapshot while preserving deployment id, application/environment identity, lifecycle state, and timestamps;
+- a pruned reference is unavailable through normal rollback lookup and can never be reconstructed as an executable `RollbackReference` from the cleared fields;
+- rollback-reference `recorded`/`superseded`/`consumed` history and explicit rollback-operation history remain queryable after snapshot pruning because lifecycle rows are retained rather than deleted;
+- startup cleanup runs after crash recovery and before spawning `remote-exec-mcp`; cleanup does not release deployment, rollback-operation, or unresolved-recovery mutation guards.
 
 Verification retry acceptance criteria:
 
