@@ -69,8 +69,8 @@ Controls:
 
 Regression coverage:
 
-- `tests/threat_model_regressions.rs::deploy_mcp_rejects_caller_controlled_execution_and_remote_destination_fields`
-- `tests/threat_model_regressions.rs::rollback_and_history_mcp_inputs_reject_remote_execution_controls`
+- `tests/threat_model.rs::ai_facing_mutation_schemas_reject_remote_capability_injection`
+- `tests/threat_model.rs::ai_facing_read_schemas_do_not_accept_remote_execution_controls`
 - existing MCP adapter tests in `src/mcp.rs`.
 
 ### 2. Local filesystem read escape
@@ -88,9 +88,10 @@ Controls:
 
 Regression coverage:
 
-- `tests/threat_model_regressions.rs::missing_local_artifact_capability_denies_before_remote_work_or_persistence`
-- `tests/threat_model_regressions.rs::symlink_escape_denies_before_remote_work_or_persistence`
-- `tests/threat_model_regressions.rs::unsafe_artifact_capability_roots_are_rejected_at_configuration_boundary`
+- `tests/threat_model.rs::missing_local_artifact_capability_denies_before_remote_or_durable_work`
+- `tests/threat_model.rs::artifact_outside_allowlist_is_rejected_before_remote_or_durable_work`
+- `tests/threat_model.rs::symlink_inside_allowlist_cannot_escape_before_remote_or_durable_work`
+- `tests/threat_model.rs::unsafe_artifact_capability_roots_are_rejected_at_configuration_boundary`
 - focused unit tests in `src/application/artifact_access.rs` and `src/config.rs`.
 
 ### 3. Duplicate or replayed mutation
@@ -127,9 +128,26 @@ Controls:
 Regression coverage:
 
 - `tests/explicit_rollback.rs`
-- raw rollback input rejection in `tests/threat_model_regressions.rs` and `src/mcp.rs`.
+- rollback input rejection in `tests/threat_model.rs::ai_facing_mutation_schemas_reject_remote_capability_injection` and `src/mcp.rs`.
 
-### 5. Ambiguous timeout or crash state
+### 5. Unconfigured target or capability substitution
+
+Threat: a caller attempts to reinterpret an application/environment value as a transport address, or to promote caller-controlled values into remote target, task, path, or task-parameter authority.
+
+Controls:
+
+- application and environment are configuration references rather than transport endpoints;
+- unknown application/environment values are rejected before remote work;
+- target, task names, and remote deployment paths are selected from the configured environment;
+- the local artifact path is authorized and canonicalized, but is not promoted into named-task parameters;
+- version, target, task, shell, command, and credential-like caller values never become remote task parameters.
+
+Regression coverage:
+
+- `tests/threat_model.rs::unknown_environment_cannot_be_used_to_select_an_unconfigured_target`
+- `tests/threat_model.rs::deployment_remote_calls_are_derived_only_from_configured_capabilities`.
+
+### 6. Ambiguous timeout or crash state
 
 Threat: a remote action may have completed even though deploy-mcp timed out or crashed, and immediately retrying or rolling back could duplicate or compound mutation.
 
@@ -146,7 +164,7 @@ Regression coverage:
 - `tests/startup_recovery.rs`
 - `tests/recovery_acknowledgement.rs`.
 
-### 6. Information disclosure through history tools
+### 7. Information disclosure through history tools
 
 Threat: read-only history becomes an indirect way to obtain credentials, shell controls, or executable rollback snapshot details.
 
@@ -160,9 +178,9 @@ Controls:
 Regression coverage:
 
 - `tests/structured_audit_history.rs`
-- MCP history parameter rejection in `tests/threat_model_regressions.rs` and `src/mcp.rs`.
+- history/list/get parameter rejection in `tests/threat_model.rs::ai_facing_read_schemas_do_not_accept_remote_execution_controls` and `src/mcp.rs`.
 
-### 7. Security-boundary collapse with remote-exec-mcp
+### 8. Security-boundary collapse with remote-exec-mcp
 
 Threat: deploy-mcp starts implementing SSH/SFTP or bypasses remote-exec-mcp policy by exposing generic protocol calls.
 
@@ -176,6 +194,7 @@ Controls:
 Regression coverage:
 
 - adapter contract/unit tests in `src/adapters.rs`;
+- `tests/threat_model.rs::deployment_remote_calls_are_derived_only_from_configured_capabilities`;
 - Phase 4 acceptance tests and dependency review in CI.
 
 ## Fail-closed ordering requirements
@@ -194,6 +213,9 @@ invalid/disabled local artifact capability
 active mutation/recovery guard
   -> reject before new remote work
 
+unknown application/environment
+  -> reject before target selection or remote work
+
 missing remote target/task capability
   -> fail during PRECHECKING
   -> no live artifact mutation
@@ -211,6 +233,8 @@ The local artifact allowlist is authorization, not immutable snapshotting. A pro
 
 The application threat model also does not defend against a hostile kernel/host administrator, direct tampering with the SQLite database, or compromise of `remote-exec-mcp`. Those remain OS/infrastructure security responsibilities and should not be “solved” by adding generic shell, credential, or transport logic to deploy-mcp.
 
-## Change rule
+## Regression suite rule
+
+`tests/threat_model.rs` is the focused cross-layer suite for the caller-to-capability boundary. It intentionally complements rather than duplicates transition, persistence, idempotency, rollback, timeout, recovery, reconciliation, retention, and remote-exec contract suites.
 
 Any new v0.1 or post-v0.1 capability that expands caller-controlled inputs, filesystem access, durable mutation, rollback authority, or remote execution must update this threat model and add a regression proving the new boundary fails closed.
