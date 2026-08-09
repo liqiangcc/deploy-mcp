@@ -1,0 +1,74 @@
+name: Real remote-exec systemd E2E
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/e2e-real-systemd.yml
+      - scripts/e2e/**
+      - tests/real_systemd_e2e.rs
+      - docs/REAL_SYSTEMD_E2E.md
+  pull_request:
+    paths:
+      - .github/workflows/e2e-real-systemd.yml
+      - scripts/e2e/**
+      - tests/real_systemd_e2e.rs
+      - docs/REAL_SYSTEMD_E2E.md
+
+permissions:
+  contents: read
+
+jobs:
+  real-systemd-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout deploy-mcp
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned remote-exec-mcp
+        uses: actions/checkout@v4
+        with:
+          repository: liqiangcc/remote-exec-mcp
+          ref: d2550b7d69682927be4c0d2077293e8b9df7f4e4
+          path: remote-exec-mcp
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install SSH server
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-server
+
+      - name: Build pinned remote-exec-mcp
+        run: cargo build --release --manifest-path remote-exec-mcp/Cargo.toml
+
+      - name: Build deploy-mcp
+        run: cargo build --locked --bin deploy-mcp
+
+      - name: Prepare disposable SSH + systemd target
+        run: bash scripts/e2e/setup_real_systemd_target.sh
+
+      - name: Run full MCP-to-systemd acceptance test
+        env:
+          DEPLOY_MCP_REAL_E2E: '1'
+          DEPLOY_MCP_E2E_REMOTE_EXEC_BIN: ${{ github.workspace }}/remote-exec-mcp/target/release/remote-exec-mcp
+        run: cargo test --locked --test real_systemd_e2e -- --nocapture
+
+      - name: Capture diagnostics on failure
+        if: failure()
+        run: |
+          sudo systemctl status deploy-mcp-e2e.service --no-pager || true
+          sudo journalctl -u deploy-mcp-e2e.service --no-pager -n 200 || true
+          if [[ -n "${DEPLOY_MCP_E2E_WORK_ROOT:-}" ]]; then
+            test ! -f "$DEPLOY_MCP_E2E_WORK_ROOT/sshd.log" || cat "$DEPLOY_MCP_E2E_WORK_ROOT/sshd.log"
+            test ! -f "$DEPLOY_MCP_E2E_WORK_ROOT/remote-exec-audit.jsonl" || cat "$DEPLOY_MCP_E2E_WORK_ROOT/remote-exec-audit.jsonl"
+          fi
