@@ -90,11 +90,12 @@ mod tests {
             result: 7,
             ..Default::default()
         };
-        let mut service = RollbackRetentionService::new(&mut repository, 30, 500);
-        let report = service.cleanup_at(100 * MILLIS_PER_DAY).unwrap();
-        assert_eq!(report.pruned_references, 7);
-        assert_eq!(report.cutoff_unix_ms, 70 * MILLIS_PER_DAY);
-        drop(service);
+        {
+            let mut service = RollbackRetentionService::new(&mut repository, 30, 500);
+            let report = service.cleanup_at(100 * MILLIS_PER_DAY).unwrap();
+            assert_eq!(report.pruned_references, 7);
+            assert_eq!(report.cutoff_unix_ms, 70 * MILLIS_PER_DAY);
+        }
         assert_eq!(repository.cutoff, Some(70 * MILLIS_PER_DAY));
         assert_eq!(repository.limit, Some(500));
     }
