@@ -450,6 +450,9 @@ where
                 .await?;
             match failure {
                 None => return Ok(None),
+                Some(failure) if failure.code == ErrorCode::OperationTimedOut => {
+                    return Ok(Some(failure));
+                }
                 Some(failure) if attempt == max_attempts => return Ok(Some(failure)),
                 Some(_) => sleep(Duration::from_millis(retry_delay_ms)).await,
             }
@@ -464,6 +467,17 @@ where
         environment: &EnvironmentConfig,
         failure: DeploymentFailure,
     ) -> AppResult<DeploymentOutcome> {
+        if failure.code == ErrorCode::OperationTimedOut
+            && deployment.state().has_live_mutation_started()
+        {
+            return Ok(DeploymentOutcome {
+                deployment,
+                failure: Some(failure),
+                rollback_failure: None,
+                idempotent_replay: false,
+            });
+        }
+
         if !plan.requires_rollback_after_failure(failure.step) {
             self.transition(&mut deployment, DeploymentState::Failed)?;
             return Ok(DeploymentOutcome {
@@ -476,6 +490,17 @@ where
 
         self.transition(&mut deployment, DeploymentState::RollingBack)?;
         let rollback_failure = self.execute_rollback(deployment.id(), environment).await?;
+        if rollback_failure
+            .as_ref()
+            .is_some_and(|failure| failure.code == ErrorCode::OperationTimedOut)
+        {
+            return Ok(DeploymentOutcome {
+                deployment,
+                failure: Some(failure),
+                rollback_failure,
+                idempotent_replay: false,
+            });
+        }
         match rollback_failure {
             None => self.transition(&mut deployment, DeploymentState::RolledBack)?,
             Some(_) => self.transition(&mut deployment, DeploymentState::RollbackFailed)?,
@@ -673,7 +698,9 @@ fn deployment_timeout_failure(step: DeploymentStep, timeout_ms: u64) -> Deployme
     DeploymentFailure::new(
         step,
         ErrorCode::OperationTimedOut,
-        format!("deployment step {step:?} exceeded {timeout_ms} ms"),
+        format!(
+            "deployment step {step:?} exceeded {timeout_ms} ms; remote completion is unknown"
+        ),
     )
 }
 
