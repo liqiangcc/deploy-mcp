@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{bail, Context, Result};
 use deploy_mcp::adapters::RemoteExecMcpAdapter;
 use deploy_mcp::application::{DeploymentApi, DeploymentApplication, StartupRecoveryService};
+use deploy_mcp::audit_persistence::SqliteAuditRepository;
 use deploy_mcp::config::Config;
 use deploy_mcp::domain::RecoveryDisposition;
 use deploy_mcp::mcp::DeployMcp;
@@ -62,17 +63,24 @@ async fn main() -> Result<()> {
             SqliteRollbackRepository::open(&database_path)
                 .with_context(|| format!("failed to open rollback database at {database_path}"))?,
         )));
+    let audit_repository = Arc::new(
+        SqliteAuditRepository::open(&database_path)
+            .with_context(|| format!("failed to open audit history database at {database_path}"))?,
+    );
     let remote = Arc::new(
         RemoteExecMcpAdapter::spawn_from_config(&config.remote_exec)
             .await
             .context("failed to start remote-exec-mcp child process")?,
     );
-    let application: Arc<dyn DeploymentApi> = Arc::new(DeploymentApplication::new(
-        Arc::clone(&config),
-        remote,
-        repository,
-        rollback_repository,
-    ));
+    let application: Arc<dyn DeploymentApi> = Arc::new(
+        DeploymentApplication::new(
+            Arc::clone(&config),
+            remote,
+            repository,
+            rollback_repository,
+        )
+        .with_audit_repository(audit_repository),
+    );
 
     let service = DeployMcp::new(application).serve(stdio()).await?;
     service.waiting().await?;
