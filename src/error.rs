@@ -18,6 +18,7 @@ pub enum ErrorCode {
     InvalidArtifact,
     ArtifactNotFound,
     ArtifactChanged,
+    ArtifactPathNotAllowed,
     IdempotencyConflict,
     ArtifactVersionConflict,
     ConflictingDeployment,
@@ -46,6 +47,7 @@ impl ErrorCode {
             Self::InvalidArtifact => "invalid_artifact",
             Self::ArtifactNotFound => "artifact_not_found",
             Self::ArtifactChanged => "artifact_changed",
+            Self::ArtifactPathNotAllowed => "artifact_path_not_allowed",
             Self::IdempotencyConflict => "idempotency_conflict",
             Self::ArtifactVersionConflict => "artifact_version_conflict",
             Self::ConflictingDeployment => "conflicting_deployment",
@@ -109,6 +111,10 @@ mod tests {
             (ErrorCode::InvalidArtifact, "invalid_artifact"),
             (ErrorCode::ArtifactNotFound, "artifact_not_found"),
             (ErrorCode::ArtifactChanged, "artifact_changed"),
+            (
+                ErrorCode::ArtifactPathNotAllowed,
+                "artifact_path_not_allowed",
+            ),
             (ErrorCode::IdempotencyConflict, "idempotency_conflict"),
             (
                 ErrorCode::ArtifactVersionConflict,
