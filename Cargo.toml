@@ -5,6 +5,17 @@ edition = "2021"
 description = "A deployment-orchestration MCP that composes safe remote execution capabilities"
 license = "MIT"
 
+[features]
+default = []
+protocol-fixture = []
+
+[[bin]]
+name = "remote-exec-protocol-fixture"
+path = "tests/fixtures/remote_exec_protocol_fixture.rs"
+required-features = ["protocol-fixture"]
+test = false
+bench = false
+
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
