@@ -1,0 +1,503 @@
+name: Phase 7 timeout hardening
+
+on:
+  push:
+    branches:
+      - docs/v0.1-design
+    paths:
+      - .github/workflows/phase7-timeouts.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: docs/v0.1-design
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Apply timeout boundaries
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected exactly one match, found {count}")
+              return text.replace(old, new, 1)
+
+          def replace_between(text: str, start_marker: str, end_marker: str, replacement: str, label: str) -> str:
+              start = text.find(start_marker)
+              if start < 0:
+                  raise SystemExit(f"{label}: start marker not found")
+              end = text.find(end_marker, start)
+              if end < 0:
+                  raise SystemExit(f"{label}: end marker not found")
+              return text[:start] + replacement + text[end:]
+
+          # Tokio time support.
+          path = Path("Cargo.toml")
+          text = path.read_text()
+          text = replace_once(
+              text,
+              'tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread"] }',
+              'tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "time"] }',
+              "Cargo.toml tokio features",
+          )
+          path.write_text(text)
+
+          # Runtime timeout configuration and validation.
+          path = Path("src/config.rs")
+          text = path.read_text()
+          text = replace_once(
+              text,
+              "pub struct Config {\n    pub remote_exec: RemoteExecConfig,\n    pub applications: BTreeMap<String, ApplicationConfig>,\n}",
+              "pub struct Config {\n    pub remote_exec: RemoteExecConfig,\n    #[serde(default)]\n    pub runtime: RuntimeConfig,\n    pub applications: BTreeMap<String, ApplicationConfig>,\n}",
+              "Config runtime field",
+          )
+          runtime_struct = '''\nconst MAX_TIMEOUT_MS: u64 = 3_600_000;\n\n#[derive(Debug, Clone, Deserialize)]\npub struct RuntimeConfig {\n    #[serde(default = "default_deployment_step_timeout_ms")]\n    pub deployment_step_timeout_ms: u64,\n    #[serde(default = "default_explicit_rollback_timeout_ms")]\n    pub explicit_rollback_timeout_ms: u64,\n}\n\nimpl Default for RuntimeConfig {\n    fn default() -> Self {\n        Self {\n            deployment_step_timeout_ms: default_deployment_step_timeout_ms(),\n            explicit_rollback_timeout_ms: default_explicit_rollback_timeout_ms(),\n        }\n    }\n}\n\nconst fn default_deployment_step_timeout_ms() -> u64 {\n    120_000\n}\n\nconst fn default_explicit_rollback_timeout_ms() -> u64 {\n    300_000\n}\n'''
+          text = replace_once(
+              text,
+              "pub struct RemoteExecConfig {\n    pub command: String,\n    #[serde(default)]\n    pub args: Vec<String>,\n}\n",
+              "pub struct RemoteExecConfig {\n    pub command: String,\n    #[serde(default)]\n    pub args: Vec<String>,\n}\n" + runtime_struct,
+              "RuntimeConfig insertion",
+          )
+          text = replace_once(
+              text,
+              "        for (index, argument) in self.remote_exec.args.iter().enumerate() {\n            validate_process_value(&format!(\"remote_exec.args[{index}]\"), argument)?;\n        }\n\n        if self.applications.is_empty() {",
+              "        for (index, argument) in self.remote_exec.args.iter().enumerate() {\n            validate_process_value(&format!(\"remote_exec.args[{index}]\"), argument)?;\n        }\n        validate_timeout(\n            \"runtime.deployment_step_timeout_ms\",\n            self.runtime.deployment_step_timeout_ms,\n        )?;\n        validate_timeout(\n            \"runtime.explicit_rollback_timeout_ms\",\n            self.runtime.explicit_rollback_timeout_ms,\n        )?;\n\n        if self.applications.is_empty() {",
+              "runtime timeout validation",
+          )
+          text = replace_once(
+              text,
+              "fn validate_process_value(kind: &str, value: &str) -> AppResult<()> {\n    if value.contains('\\0') {\n        return Err(AppError::invalid_configuration(format!(\n            \"{kind} must not contain NUL\"\n        )));\n    }\n    Ok(())\n}\n",
+              "fn validate_process_value(kind: &str, value: &str) -> AppResult<()> {\n    if value.contains('\\0') {\n        return Err(AppError::invalid_configuration(format!(\n            \"{kind} must not contain NUL\"\n        )));\n    }\n    Ok(())\n}\n\nfn validate_timeout(kind: &str, value: u64) -> AppResult<()> {\n    if value == 0 || value > MAX_TIMEOUT_MS {\n        return Err(AppError::invalid_configuration(format!(\n            \"{kind} must be between 1 and {MAX_TIMEOUT_MS} milliseconds\"\n        )));\n    }\n    Ok(())\n}\n",
+              "validate_timeout helper",
+          )
+          path.write_text(text)
+
+          # Stable timeout error code.
+          path = Path("src/error.rs")
+          text = path.read_text()
+          text = replace_once(
+              text,
+              "    RemoteExecutionFailed,\n    VerificationFailed,",
+              "    RemoteExecutionFailed,\n    OperationTimedOut,\n    VerificationFailed,",
+              "ErrorCode enum",
+          )
+          text = replace_once(
+              text,
+              "            Self::RemoteExecutionFailed => \"remote_execution_failed\",\n            Self::VerificationFailed => \"verification_failed\",",
+              "            Self::RemoteExecutionFailed => \"remote_execution_failed\",\n            Self::OperationTimedOut => \"operation_timed_out\",\n            Self::VerificationFailed => \"verification_failed\",",
+              "ErrorCode as_str",
+          )
+          text = replace_once(
+              text,
+              "            (ErrorCode::RemoteExecutionFailed, \"remote_execution_failed\"),\n            (ErrorCode::VerificationFailed, \"verification_failed\"),",
+              "            (ErrorCode::RemoteExecutionFailed, \"remote_execution_failed\"),\n            (ErrorCode::OperationTimedOut, \"operation_timed_out\"),\n            (ErrorCode::VerificationFailed, \"verification_failed\"),",
+              "ErrorCode stability test",
+          )
+          path.write_text(text)
+
+          # Deployment step timeouts remain in the application orchestration layer.
+          path = Path("src/application/deploy.rs")
+          text = path.read_text()
+          text = replace_once(
+              text,
+              "use tokio::io::AsyncReadExt;\nuse uuid::Uuid;",
+              "use tokio::io::AsyncReadExt;\nuse tokio::time::{timeout, Duration};\nuse uuid::Uuid;",
+              "deploy timeout import",
+          )
+          preflight_fn = '''    async fn execute_capability_preflight(\n        &self,\n        deployment_id: &DeploymentId,\n        environment: &EnvironmentConfig,\n    ) -> AppResult<Option<DeploymentFailure>> {\n        let attempt = self.start_attempt(deployment_id, DeploymentStep::Precheck)?;\n        let timeout_ms = self.config.runtime.deployment_step_timeout_ms;\n        let result = timeout(\n            Duration::from_millis(timeout_ms),\n            preflight_remote_capabilities(self.remote.as_ref(), environment),\n        )\n        .await;\n        let failure = match result {\n            Ok(Ok(_)) => None,\n            Ok(Err(error)) => Some(preflight_failure(error)),\n            Err(_) => Some(deployment_timeout_failure(\n                DeploymentStep::Precheck,\n                timeout_ms,\n            )),\n        };\n        self.finish_from_failure(attempt, failure.as_ref())?;\n        Ok(failure)\n    }\n\n'''
+          text = replace_between(
+              text,
+              "    async fn execute_capability_preflight(\n",
+              "    async fn execute_upload(\n",
+              preflight_fn,
+              "execute_capability_preflight",
+          )
+          upload_fn = '''    async fn execute_upload(\n        &self,\n        deployment_id: &DeploymentId,\n        environment: &EnvironmentConfig,\n        local_path: &str,\n        expected_bytes: u64,\n    ) -> AppResult<Option<DeploymentFailure>> {\n        let attempt = self.start_attempt(deployment_id, DeploymentStep::StageArtifact)?;\n        let timeout_ms = self.config.runtime.deployment_step_timeout_ms;\n        let result = timeout(\n            Duration::from_millis(timeout_ms),\n            self.remote.upload_file(\n                &environment.target,\n                local_path,\n                &environment.staging_path,\n                true,\n            ),\n        )\n        .await;\n\n        let failure = match result {\n            Err(_) => Some(deployment_timeout_failure(\n                DeploymentStep::StageArtifact,\n                timeout_ms,\n            )),\n            Ok(Ok(result)) if result.bytes_transferred == expected_bytes => None,\n            Ok(Ok(result)) => Some(DeploymentFailure::new(\n                DeploymentStep::StageArtifact,\n                ErrorCode::ArtifactChanged,\n                format!(\n                    \"staged byte count changed: expected {expected_bytes}, transferred {}\",\n                    result.bytes_transferred\n                ),\n            )),\n            Ok(Err(error)) => Some(DeploymentFailure::from_remote(\n                DeploymentStep::StageArtifact,\n                ErrorCode::RemoteExecutionFailed,\n                \"artifact staging failed\",\n                error,\n            )),\n        };\n\n        self.finish_from_failure(attempt, failure.as_ref())?;\n        Ok(failure)\n    }\n\n'''
+          text = replace_between(
+              text,
+              "    async fn execute_upload(\n",
+              "    #[allow(clippy::too_many_arguments)]\n",
+              upload_fn,
+              "execute_upload",
+          )
+          named_task_fn = '''    #[allow(clippy::too_many_arguments)]\n    async fn execute_named_task(\n        &self,\n        deployment_id: &DeploymentId,\n        step: DeploymentStep,\n        target: &str,\n        task: &str,\n        parameters: BTreeMap<String, Value>,\n        failure_code: ErrorCode,\n        action: &str,\n    ) -> AppResult<Option<DeploymentFailure>> {\n        let attempt = self.start_attempt(deployment_id, step)?;\n        let timeout_ms = self.config.runtime.deployment_step_timeout_ms;\n        let result = timeout(\n            Duration::from_millis(timeout_ms),\n            self.remote.run_task(target, task, parameters),\n        )\n        .await;\n        let failure = match result {\n            Err(_) => Some(deployment_timeout_failure(step, timeout_ms)),\n            Ok(Ok(result)) if result.success => None,\n            Ok(Ok(result)) => Some(task_result_failure(\n                step,\n                failure_code,\n                action,\n                task,\n                &result,\n            )),\n            Ok(Err(error)) => Some(DeploymentFailure::from_remote(\n                step,\n                failure_code,\n                action,\n                error,\n            )),\n        };\n\n        self.finish_from_failure(attempt, failure.as_ref())?;\n        Ok(failure)\n    }\n\n'''
+          text = replace_between(
+              text,
+              "    #[allow(clippy::too_many_arguments)]\n    async fn execute_named_task(\n",
+              "    async fn finish_primary_failure(\n",
+              named_task_fn,
+              "execute_named_task",
+          )
+          text = replace_once(
+              text,
+              "fn preflight_failure(error: RemotePreflightError) -> DeploymentFailure {",
+              "fn deployment_timeout_failure(step: DeploymentStep, timeout_ms: u64) -> DeploymentFailure {\n    DeploymentFailure::new(\n        step,\n        ErrorCode::OperationTimedOut,\n        format!(\"deployment step {step:?} exceeded {timeout_ms} ms\"),\n    )\n}\n\nfn preflight_failure(error: RemotePreflightError) -> DeploymentFailure {",
+              "deployment timeout helper",
+          )
+          path.write_text(text)
+
+          # Explicit rollback uses a whole-operation timeout. On expiry we keep the
+          # durable operation STARTED so existing mutation guards fail closed until
+          # startup recovery/manual reconciliation resolves the unknown remote state.
+          path = Path("src/application/rollback.rs")
+          text = path.read_text()
+          text = replace_once(
+              text,
+              "use serde_json::Value;\nuse uuid::Uuid;",
+              "use serde_json::Value;\nuse tokio::time::{timeout, Duration};\nuse uuid::Uuid;",
+              "rollback timeout import",
+          )
+          start_marker = "        if let Some(failure) = self.preflight(&reference).await {\n"
+          end_marker = "        self.rollback_repository(|repository| {\n"
+          operation_block = '''        let timeout_ms = self.config.runtime.explicit_rollback_timeout_ms;\n        let operation_result = timeout(Duration::from_millis(timeout_ms), async {\n            if let Some(failure) = self.preflight(&reference).await {\n                return Some(failure);\n            }\n            if let Some(failure) = self\n                .run_task(\n                    &reference,\n                    reference.rollback_task(),\n                    BTreeMap::from([\n                        (\n                            \"backup_path\".to_owned(),\n                            Value::String(reference.backup_path().to_owned()),\n                        ),\n                        (\n                            \"install_path\".to_owned(),\n                            Value::String(reference.install_path().to_owned()),\n                        ),\n                    ]),\n                    \"rollback restore task failed\",\n                )\n                .await\n            {\n                return Some(failure);\n            }\n            if let Some(failure) = self\n                .run_task(\n                    &reference,\n                    reference.restart_task(),\n                    BTreeMap::new(),\n                    \"rollback restart task failed\",\n                )\n                .await\n            {\n                return Some(failure);\n            }\n            if let Some(failure) = self\n                .run_task(\n                    &reference,\n                    reference.health_check_task(),\n                    BTreeMap::new(),\n                    \"rollback verification task failed\",\n                )\n                .await\n            {\n                return Some(failure);\n            }\n            None\n        })\n        .await;\n\n        match operation_result {\n            Ok(Some(failure)) => {\n                return self.finish_failed(operation_id, deployment_id, failure);\n            }\n            Ok(None) => {}\n            Err(_) => {\n                return Err(AppError::new(\n                    ErrorCode::OperationTimedOut,\n                    format!(\n                        \"explicit rollback operation {} exceeded {timeout_ms} ms; durable operation remains STARTED and further mutation is blocked until recovery/reconciliation\",\n                        operation_id.as_str()\n                    ),\n                ));\n            }\n        }\n\n'''
+          text = replace_between(text, start_marker, end_marker, operation_block, "explicit rollback operation timeout")
+          path.write_text(text)
+
+          # Example configuration.
+          path = Path("config/example.yaml")
+          text = path.read_text()
+          text = replace_once(
+              text,
+              "remote_exec:\n  command: remote-exec-mcp\n  args:\n    - /etc/remote-exec/config.yaml\n\napplications:",
+              "remote_exec:\n  command: remote-exec-mcp\n  args:\n    - /etc/remote-exec/config.yaml\n\nruntime:\n  deployment_step_timeout_ms: 120000\n  explicit_rollback_timeout_ms: 300000\n\napplications:",
+              "example runtime config",
+          )
+          path.write_text(text)
+
+          # Integration tests exercise timeout failure semantics without SSH.
+          Path("tests/timeouts.rs").write_text(r'''use std::collections::{BTreeMap, BTreeSet};
+          use std::fs;
+          use std::path::Path;
+          use std::sync::{Arc, Mutex};
+          use std::time::Duration;
+
+          use async_trait::async_trait;
+          use deploy_mcp::application::{DeployRequest, DeploymentApi, DeploymentApplication};
+          use deploy_mcp::config::Config;
+          use deploy_mcp::domain::{DeploymentState, DeploymentStep, RollbackReferenceState};
+          use deploy_mcp::error::ErrorCode;
+          use deploy_mcp::persistence::SqliteDeploymentRepository;
+          use deploy_mcp::ports::{
+              RemoteExecutionPort, RemoteExecutionResult, RemoteTargetCheck, RemoteTaskResult,
+              RemoteTransferResult, RollbackRepository, StepAttemptStatus,
+          };
+          use deploy_mcp::rollback_persistence::SqliteRollbackRepository;
+          use serde_json::Value;
+          use tempfile::TempDir;
+
+          const STAGING_PATH: &str = "/opt/staging/demo.jar";
+          const INSTALL_PATH: &str = "/opt/apps/demo/demo.jar";
+          const BACKUP_PATH: &str = "/opt/apps/demo/backup/demo.jar";
+
+          type Application = DeploymentApplication<ControlledRemote, SqliteDeploymentRepository>;
+
+          #[derive(Clone, Default)]
+          struct ControlledRemote {
+              slow_task: Arc<Mutex<Option<String>>>,
+          }
+
+          impl ControlledRemote {
+              fn set_slow_task(&self, task: Option<&str>) {
+                  *self.slow_task.lock().expect("slow task lock poisoned") =
+                      task.map(str::to_owned);
+              }
+          }
+
+          #[async_trait]
+          impl RemoteExecutionPort for ControlledRemote {
+              async fn check_target(&self, _target: &str) -> RemoteExecutionResult<RemoteTargetCheck> {
+                  Ok(RemoteTargetCheck {
+                      reachable: true,
+                      remote_identity: Some("test-host".to_owned()),
+                  })
+              }
+
+              async fn list_tasks(&self, _target: &str) -> RemoteExecutionResult<BTreeSet<String>> {
+                  Ok(BTreeSet::from([
+                      "demo-backup".to_owned(),
+                      "demo-install".to_owned(),
+                      "demo-restart".to_owned(),
+                      "demo-health".to_owned(),
+                      "demo-rollback".to_owned(),
+                  ]))
+              }
+
+              async fn upload_file(
+                  &self,
+                  _target: &str,
+                  local_path: &str,
+                  _remote_path: &str,
+                  _overwrite: bool,
+              ) -> RemoteExecutionResult<RemoteTransferResult> {
+                  Ok(RemoteTransferResult {
+                      bytes_transferred: fs::metadata(local_path)
+                          .expect("test artifact metadata")
+                          .len(),
+                  })
+              }
+
+              async fn run_task(
+                  &self,
+                  _target: &str,
+                  task: &str,
+                  _parameters: BTreeMap<String, Value>,
+              ) -> RemoteExecutionResult<RemoteTaskResult> {
+                  let should_sleep = self
+                      .slow_task
+                      .lock()
+                      .expect("slow task lock poisoned")
+                      .as_deref()
+                      == Some(task);
+                  if should_sleep {
+                      tokio::time::sleep(Duration::from_millis(75)).await;
+                  }
+                  Ok(RemoteTaskResult {
+                      success: true,
+                      exit_code: Some(0),
+                      stdout: String::new(),
+                      stderr: String::new(),
+                      duration_ms: 1,
+                      stdout_truncated: false,
+                      stderr_truncated: false,
+                  })
+              }
+          }
+
+          struct Fixture {
+              _directory: TempDir,
+              database_path: std::path::PathBuf,
+              artifact_path: String,
+              config: Arc<Config>,
+              remote: ControlledRemote,
+              application: Application,
+          }
+
+          fn config(step_timeout_ms: u64, rollback_timeout_ms: u64) -> Arc<Config> {
+              Arc::new(
+                  Config::from_yaml(&format!(
+                      r#"
+          remote_exec:
+            command: remote-exec-mcp
+          runtime:
+            deployment_step_timeout_ms: {step_timeout_ms}
+            explicit_rollback_timeout_ms: {rollback_timeout_ms}
+          applications:
+            demo:
+              artifact_type: jar
+              environments:
+                test:
+                  target: test-server
+                  staging_path: {STAGING_PATH}
+                  install_path: {INSTALL_PATH}
+                  backup_path: {BACKUP_PATH}
+                  tasks:
+                    backup: demo-backup
+                    install: demo-install
+                    restart: demo-restart
+                    health_check: demo-health
+                    rollback: demo-rollback
+          "#
+                  ))
+                  .unwrap(),
+              )
+          }
+
+          fn application_for_database(
+              config: Arc<Config>,
+              remote: ControlledRemote,
+              database_path: &Path,
+          ) -> Application {
+              let deployments = Arc::new(Mutex::new(
+                  SqliteDeploymentRepository::open(database_path).unwrap(),
+              ));
+              let rollbacks: Arc<Mutex<Box<dyn RollbackRepository + Send>>> = Arc::new(Mutex::new(
+                  Box::new(SqliteRollbackRepository::open(database_path).unwrap()),
+              ));
+              DeploymentApplication::new(config, Arc::new(remote), deployments, rollbacks)
+          }
+
+          fn fixture(step_timeout_ms: u64, rollback_timeout_ms: u64) -> Fixture {
+              let directory = tempfile::tempdir().unwrap();
+              let database_path = directory.path().join("deployments.sqlite");
+              let artifact = directory.path().join("demo.jar");
+              fs::write(&artifact, b"timeout-test-jar").unwrap();
+              let artifact_path = artifact.to_string_lossy().into_owned();
+              let config = config(step_timeout_ms, rollback_timeout_ms);
+              let remote = ControlledRemote::default();
+              let application = application_for_database(
+                  Arc::clone(&config),
+                  remote.clone(),
+                  &database_path,
+              );
+              Fixture {
+                  _directory: directory,
+                  database_path,
+                  artifact_path,
+                  config,
+                  remote,
+                  application,
+              }
+          }
+
+          fn deploy_request(version: &str, artifact_path: &str) -> DeployRequest {
+              DeployRequest {
+                  application: "demo".to_owned(),
+                  environment: "test".to_owned(),
+                  version: version.to_owned(),
+                  artifact_path: artifact_path.to_owned(),
+                  idempotency_key: None,
+              }
+          }
+
+          #[tokio::test]
+          async fn deployment_step_timeout_is_durable_and_respects_pre_mutation_boundary() {
+              let fixture = fixture(10, 1_000);
+              fixture.remote.set_slow_task(Some("demo-backup"));
+
+              let result = fixture
+                  .application
+                  .deploy_application(deploy_request("1.0.0", &fixture.artifact_path))
+                  .await
+                  .unwrap();
+              assert_eq!(result.outcome.deployment.state(), DeploymentState::Failed);
+              let failure = result.outcome.failure.unwrap();
+              assert_eq!(failure.step, DeploymentStep::BackupCurrent);
+              assert_eq!(failure.code, ErrorCode::OperationTimedOut);
+              assert!(result.outcome.rollback_failure.is_none());
+
+              let details = fixture
+                  .application
+                  .get_deployment(result.outcome.deployment.id().as_str())
+                  .unwrap();
+              let attempt = details
+                  .step_attempts
+                  .iter()
+                  .find(|attempt| attempt.step == DeploymentStep::BackupCurrent)
+                  .unwrap();
+              assert_eq!(attempt.status, StepAttemptStatus::Failed);
+              assert!(attempt
+                  .error
+                  .as_deref()
+                  .unwrap_or_default()
+                  .contains("operation_timed_out"));
+          }
+
+          #[tokio::test]
+          async fn explicit_rollback_timeout_fails_closed_until_recovery() {
+              let fixture = fixture(1_000, 10);
+              let deployed = fixture
+                  .application
+                  .deploy_application(deploy_request("1.0.0", &fixture.artifact_path))
+                  .await
+                  .unwrap();
+              let deployment_id = deployed.outcome.deployment.id().clone();
+              assert!(deployed.rollback_reference_available);
+
+              fixture.remote.set_slow_task(Some("demo-rollback"));
+              let error = fixture
+                  .application
+                  .rollback_deployment(deployment_id.as_str())
+                  .await
+                  .unwrap_err();
+              assert_eq!(error.code, ErrorCode::OperationTimedOut);
+              assert!(error.message.contains("remains STARTED"));
+
+              let rollback_repository =
+                  SqliteRollbackRepository::open(&fixture.database_path).unwrap();
+              assert_eq!(
+                  rollback_repository
+                      .get_reference(&deployment_id)
+                      .unwrap()
+                      .unwrap()
+                      .state(),
+                  RollbackReferenceState::Active
+              );
+              drop(rollback_repository);
+
+              let second = application_for_database(
+                  Arc::clone(&fixture.config),
+                  fixture.remote.clone(),
+                  &fixture.database_path,
+              );
+              let conflict = second
+                  .deploy_application(deploy_request("2.0.0", &fixture.artifact_path))
+                  .await
+                  .unwrap_err();
+              assert_eq!(conflict.code, ErrorCode::ConflictingDeployment);
+          }
+          ''')
+
+          Path("docs/TIMEOUT_BOUNDARIES.md").write_text(r'''# Timeout Boundaries
+
+          ## Goal
+
+          Bound deployment orchestration without moving SSH/process ownership out of `remote-exec-mcp`.
+
+          ## Deployment-step timeout
+
+          `runtime.deployment_step_timeout_ms` defaults to 120000 ms and is bounded to 1..=3600000 ms.
+
+          The timeout is applied by the deployment application layer to:
+
+          - remote capability preflight;
+          - artifact staging upload;
+          - configured named tasks, including automatic rollback restore/restart/verification.
+
+          A timed-out step is durably completed as `FAILED` with stable code `operation_timed_out`. Existing mutation semantics remain authoritative: pre-mutation failures stop without rollback, while install/restart/verification failures enter the normal automatic rollback path.
+
+          ## Explicit rollback-operation timeout
+
+          `runtime.explicit_rollback_timeout_ms` defaults to 300000 ms and is bounded to 1..=3600000 ms.
+
+          This timeout covers the complete explicit rollback remote sequence after the durable rollback operation has entered `STARTED`.
+
+          On expiry, deploy-mcp does **not** mark the operation `FAILED` and does **not** make the rollback reference immediately retryable. Remote state may be unknown because a side effect can complete after the local caller stops waiting. The durable operation therefore remains `STARTED`; existing SQLite mutation guards block later deployment/rollback mutation for the same application/environment. Startup recovery subsequently converts the interrupted operation into the existing manual-reconciliation path.
+
+          This intentionally treats rollback timeout like an interrupted mutation rather than a normal remote error.
+
+          ## Separation of concerns
+
+          deploy-mcp owns orchestration deadlines and state-machine consequences. `remote-exec-mcp` continues to own SSH/SFTP connectivity, command/file-transfer limits, transport cancellation, and remote process behavior. A deploy-mcp timeout bounds how long orchestration waits; it does not claim that a remote process tree has been terminated.
+          ''')
+
+          # Mark the roadmap item complete and record the safety semantics.
+          path = Path("ROADMAP.md")
+          text = path.read_text()
+          text = replace_once(
+              text,
+              "- [ ] timeouts at deployment-step and explicit-rollback-operation level",
+              "- [x] timeouts at deployment-step and explicit-rollback-operation level",
+              "ROADMAP timeout checkbox",
+          )
+          timeout_acceptance = '''\nTimeout acceptance criteria:\n\n- deployment-step deadlines are configured in deploy-mcp and wrap capability preflight, staging upload, named deployment tasks, and automatic rollback tasks without adding SSH/SFTP behavior to the deployment domain;\n- a timed-out deployment step closes its durable step attempt as `FAILED` with stable `operation_timed_out`, then follows the existing pre/post-mutation rollback rules;\n- explicit rollback has a whole-operation deadline after the durable operation enters `STARTED`; a timeout leaves that operation `STARTED` because remote mutation state is unknown;\n- the existing cross-process mutation guard therefore blocks further deploy/rollback mutation until startup recovery/manual reconciliation resolves the timed-out rollback;\n- timeout configuration is bounded and has safe defaults; timeout handling never exposes raw commands, credentials, or remote paths through new MCP inputs.\n'''
+          marker = "\nStartup recovery acceptance criteria:\n"
+          if marker not in text:
+              raise SystemExit("ROADMAP timeout acceptance insertion marker not found")
+          text = text.replace(marker, timeout_acceptance + marker, 1)
+          path.write_text(text)
+          PY
+
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test --all-features
+      - name: Commit verified timeout hardening
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- Cargo.toml src/config.rs src/error.rs src/application/deploy.rs src/application/rollback.rs config/example.yaml tests/timeouts.rs docs/TIMEOUT_BOUNDARIES.md ROADMAP.md
+          git rm -- .github/workflows/phase7-timeouts.yml
+          git diff --cached --check
+          git commit -m "feat: enforce deployment timeout boundaries"
+          git push origin HEAD:docs/v0.1-design
