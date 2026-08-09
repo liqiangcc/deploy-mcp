@@ -5,9 +5,7 @@ use deploy_mcp::application::{DeployRequest, DeployService};
 use deploy_mcp::config::Config;
 use deploy_mcp::error::ErrorCode;
 use deploy_mcp::persistence::SqliteDeploymentRepository;
-use deploy_mcp::ports::{
-    RemoteTargetCheck, RemoteTaskResult, RemoteTransferResult,
-};
+use deploy_mcp::ports::{RemoteTargetCheck, RemoteTaskResult, RemoteTransferResult};
 
 const CONFIG: &str = r#"
 remote_exec:
