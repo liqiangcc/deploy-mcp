@@ -104,7 +104,7 @@ pub struct StepAttemptRecord {
     pub finished_at_unix_ms: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum DeploymentReservation {
     Created,
     Reused(Deployment),
@@ -115,7 +115,7 @@ pub trait DeploymentRepository {
     fn reserve(
         &mut self,
         deployment: &Deployment,
-        idempotency_key: Option<&str>,
+        _idempotency_key: Option<&str>,
     ) -> RepositoryResult<DeploymentReservation> {
         self.create(deployment)?;
         Ok(DeploymentReservation::Created)
