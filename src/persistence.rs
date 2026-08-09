@@ -757,10 +757,10 @@ mod tests {
         let path = directory.path().join("deployments.sqlite");
         let first = deployment("d-first");
         let mut repository = SqliteDeploymentRepository::open(&path).unwrap();
-        assert_eq!(
+        assert!(matches!(
             repository.reserve(&first, Some("request-1")).unwrap(),
             DeploymentReservation::Created
-        );
+        ));
         drop(repository);
 
         let mut reopened = SqliteDeploymentRepository::open(&path).unwrap();
