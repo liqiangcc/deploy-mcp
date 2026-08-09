@@ -185,7 +185,7 @@ Acceptance criteria:
 - [x] timeouts at deployment-step and explicit-rollback-operation level
 - [x] deterministic verification retry policy
 - [x] rollback-reference retention/cleanup policy
-- [ ] local artifact-path allowlist
+- [x] local artifact-path allowlist
 - [ ] threat-model regression tests
 - [ ] disposable integration test using a real remote-exec-mcp process or equivalent protocol fixture
 - [ ] README/config/client setup documentation
@@ -225,6 +225,17 @@ Rollback-reference retention acceptance criteria:
 - a pruned reference is unavailable through normal rollback lookup and can never be reconstructed as an executable `RollbackReference` from the cleared fields;
 - rollback-reference `recorded`/`superseded`/`consumed` history and explicit rollback-operation history remain queryable after snapshot pruning because lifecycle rows are retained rather than deleted;
 - startup cleanup runs after crash recovery and before spawning `remote-exec-mcp`; cleanup does not release deployment, rollback-operation, or unresolved-recovery mutation guards.
+
+Local artifact-path allowlist acceptance criteria:
+
+- local artifact authorization is an application-owned filesystem-read concern isolated from deployment semantics and remote execution; it adds no SSH/SFTP implementation and no remote path policy;
+- `local_artifacts.allowed_roots` is an explicit bounded list of at most 32 absolute non-filesystem-root paths with no `..` components; an omitted or empty list disables new local-artifact deployments rather than allowing unrestricted reads;
+- configured roots are resolved to existing directories when local artifact access is needed; an invalid/unresolvable configured root fails closed as `invalid_configuration`;
+- the caller-supplied artifact path is canonicalized before artifact content is opened/hashed and before any remote work; its canonical path must remain below at least one canonical allowed root;
+- traversal and symlink escapes are rejected with stable `artifact_path_not_allowed`, and authorization failure creates no deployment reservation/state and invokes no `RemoteExecutionPort` operation;
+- the same canonical authorized path is used for SHA-256/size calculation and passed to `RemoteExecutionPort::upload_file`, avoiding divergent path interpretation between the local read and transfer request;
+- `remote-exec-mcp` continues to apply its own independent local transfer allowlist/bounds; deploy-mcp does not assume its local read authorization replaces remote-exec policy;
+- the MCP surface gains no new caller-controlled commands, credentials, task names, or remote deployment paths, and explicit rollback/recovery flows do not depend on the local artifact allowlist.
 
 Verification retry acceptance criteria:
 
