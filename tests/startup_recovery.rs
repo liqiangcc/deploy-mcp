@@ -101,7 +101,10 @@ fn pre_side_effect_interruption_is_failed_and_auto_resolved() {
         .unwrap()
         .contains("no remote side-effecting deployment step had started"));
     let transitions = deployments.transitions(interrupted.id()).unwrap();
-    assert_eq!(transitions.last().unwrap().from, DeploymentState::Prechecking);
+    assert_eq!(
+        transitions.last().unwrap().from,
+        DeploymentState::Prechecking
+    );
     assert_eq!(transitions.last().unwrap().to, DeploymentState::Failed);
 
     deployments.create(&deployment("next-safe-deploy")).unwrap();

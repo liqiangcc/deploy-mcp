@@ -79,10 +79,7 @@ impl RemoteExecutionPort for ControlledRemote {
         _remote_path: &str,
         _overwrite: bool,
     ) -> RemoteExecutionResult<RemoteTransferResult> {
-        let should_sleep = *self
-            .slow_upload
-            .lock()
-            .expect("slow upload lock poisoned");
+        let should_sleep = *self.slow_upload.lock().expect("slow upload lock poisoned");
         if should_sleep {
             tokio::time::sleep(Duration::from_millis(75)).await;
         }
