@@ -6,8 +6,7 @@ use deploy_mcp::domain::{
 };
 use deploy_mcp::persistence::SqliteDeploymentRepository;
 use deploy_mcp::ports::{
-    DeploymentRepository, RecoveryRepository, RepositoryError, RollbackRepository,
-    StepAttemptStatus,
+    DeploymentRepository, RepositoryError, RollbackRepository, StepAttemptStatus,
 };
 use deploy_mcp::recovery_persistence::SqliteRecoveryRepository;
 use deploy_mcp::rollback_persistence::SqliteRollbackRepository;
