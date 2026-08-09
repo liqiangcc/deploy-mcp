@@ -1,6 +1,7 @@
 remote_exec:
   command: remote-exec-mcp
   args:
+    - --config
     - /etc/remote-exec/config.yaml
 
 local_artifacts:
