@@ -4,6 +4,7 @@
 //! never depend on SSH/SFTP implementations or MCP protocol types.
 
 mod api;
+mod artifact_access;
 mod deploy;
 mod lock;
 mod preflight;
