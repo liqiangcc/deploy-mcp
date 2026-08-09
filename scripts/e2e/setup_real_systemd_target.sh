@@ -7,12 +7,17 @@ SERVICE=deploy-mcp-e2e.service
 
 rm -rf "$ROOT"
 mkdir -p "$ROOT/artifacts"
+echo "DEPLOY_MCP_E2E_WORK_ROOT=$ROOT" >> "$GITHUB_ENV"
 
 if id deploy >/dev/null 2>&1; then
   sudo usermod --shell /bin/bash deploy
 else
   sudo useradd --create-home --shell /bin/bash deploy
 fi
+# useradd creates a locked password entry on Ubuntu. Unlock the account so
+# sshd permits public-key authentication; password auth remains disabled in
+# the dedicated sshd configuration below.
+sudo passwd -d deploy
 
 sudo install -d -m 0700 -o deploy -g deploy /home/deploy/.ssh
 sudo install -d -m 0755 -o deploy -g deploy /home/deploy/staging /home/deploy/app /home/deploy/backup
@@ -123,7 +128,6 @@ sudo systemctl is-active --quiet "$SERVICE"
 test "$(cat /home/deploy/app/running-version)" = "v0"
 
 {
-  echo "DEPLOY_MCP_E2E_WORK_ROOT=$ROOT"
   echo "DEPLOY_MCP_E2E_SSH_PORT=$PORT"
   echo "DEPLOY_MCP_E2E_KNOWN_HOSTS=$ROOT/known_hosts"
   echo "DEPLOY_MCP_E2E_ARTIFACT_ROOT=$ROOT/artifacts"
