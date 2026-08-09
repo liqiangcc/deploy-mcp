@@ -5,7 +5,7 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   rust:
@@ -15,18 +15,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Sync completed v0.1 roadmap items
-        if: github.event_name == 'push' && github.ref == 'refs/heads/docs/v0.1-design'
-        run: |
-          sed -i 's/- \[ \] disposable integration test using a real remote-exec-mcp process or equivalent protocol fixture/- [x] disposable integration test using a real remote-exec-mcp process or equivalent protocol fixture/' ROADMAP.md
-          sed -i 's/- \[ \] README\/config\/client setup documentation/- [x] README\/config\/client setup documentation/' ROADMAP.md
-          if ! git diff --quiet -- ROADMAP.md; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add -- ROADMAP.md
-            git commit -m "docs: mark v0.1 hardening tasks complete"
-            git push origin HEAD:docs/v0.1-design
-          fi
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo test --locked --all-features
