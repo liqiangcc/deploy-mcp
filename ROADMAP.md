@@ -145,20 +145,26 @@ Additional invariants:
 
 ## Phase 6 — MCP adapter
 
-- [ ] stdio MCP server
-- [ ] `list_applications`
-- [ ] `deploy_application`
-- [ ] `get_deployment`
-- [ ] `list_deployments`
-- [ ] `rollback_deployment`
-- [ ] structured machine-readable errors
-- [ ] no raw shell / arbitrary path / credential parameters
+- [x] stdio MCP server
+- [x] `list_applications`
+- [x] `deploy_application`
+- [x] `get_deployment`
+- [x] `list_deployments`
+- [ ] `rollback_deployment` — requires a durable deployment-bound rollback reference and a separate rollback application use case
+- [x] structured machine-readable errors
+- [x] no raw shell / remote deployment path / credential parameters
 
 Acceptance criteria:
 
-- MCP remains a thin protocol adapter;
-- deployment semantics live in application/domain services;
-- tools return deployment records/results rather than raw SSH command output.
+- MCP remains a thin protocol adapter over the application-owned `DeploymentApi` inbound port;
+- deployment semantics remain in application/domain services rather than tool handlers;
+- tools return deployment records/results, state transitions, and step attempts rather than raw SSH command output;
+- `deploy_application` accepts only application/environment/version/local artifact path and rejects undeclared fields such as shell commands or SSH credentials;
+- `get_deployment` and `list_deployments` query durable state through `DeploymentRepository`, not SQLite from the MCP adapter;
+- `list_deployments` is bounded to 1..=200 records and requires an application when filtering by environment;
+- stdout is reserved for MCP stdio frames; startup diagnostics/logging go to stderr;
+- the server composes the existing remote-exec MCP client rather than adding SSH/SFTP code;
+- explicit rollback is not exposed until the selected deployment can be proven to own a still-valid backup reference. A fixed environment `backup_path` alone is insufficient because later deployments may overwrite it.
 
 ## Phase 7 — Production hardening for v0.1
 
