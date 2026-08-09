@@ -125,9 +125,7 @@ fn parse_subject_kind(value: &str) -> Result<RecoverySubjectKind> {
     match value {
         "deployment" => Ok(RecoverySubjectKind::Deployment),
         "rollback_operation" => Ok(RecoverySubjectKind::RollbackOperation),
-        other => bail!(
-            "invalid --subject-kind {other}; expected deployment or rollback_operation"
-        ),
+        other => bail!("invalid --subject-kind {other}; expected deployment or rollback_operation"),
     }
 }
 
@@ -141,31 +139,33 @@ mod tests {
 
     #[test]
     fn acknowledge_requires_complete_incident_identity() {
-        let error = parse_args_from([
-            "acknowledge",
-            "--incident-id",
-            "1",
-            "--application",
-            "demo",
-            "--environment",
-            "test",
-            "--subject-kind",
-            "deployment",
-            "--operator",
-            "alice",
-            "--evidence",
-            "verified service",
-        ]
-        .into_iter()
-        .map(str::to_owned))
+        let error = parse_args_from(
+            [
+                "acknowledge",
+                "--incident-id",
+                "1",
+                "--application",
+                "demo",
+                "--environment",
+                "test",
+                "--subject-kind",
+                "deployment",
+                "--operator",
+                "alice",
+                "--evidence",
+                "verified service",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
         .unwrap_err();
         assert!(error.to_string().contains("--subject-id is required"));
     }
 
     #[test]
     fn list_rejects_extra_arguments() {
-        let error = parse_args_from(["list", "unexpected"].into_iter().map(str::to_owned))
-            .unwrap_err();
+        let error =
+            parse_args_from(["list", "unexpected"].into_iter().map(str::to_owned)).unwrap_err();
         assert!(error.to_string().contains("unexpected argument"));
     }
 }
