@@ -220,7 +220,7 @@ Verification retry acceptance criteria:
 - only the configured `health_check` verification task is retried; precheck, upload, backup, install, restart, and restore tasks remain single-attempt to avoid duplicating side effects;
 - `verification_max_attempts` includes the first attempt and is bounded to `1..=10`; `verification_retry_delay_ms` is a fixed `0..=60000` millisecond delay with no jitter, randomness, or exponential backoff;
 - every deployment or automatic-rollback verification attempt is recorded as its own durable `DeploymentStep::Verify` step attempt, preserving failed attempts before a later success;
-- a successful verification attempt stops immediately; exhaustion returns the final verification failure and follows the existing deployment or rollback failure state machine without inventing a new retry state;
+- a successful verification attempt stops immediately; a completed failed health check may retry until exhaustion, but `operation_timed_out` stops immediately because remote completion is unknown;
 - automatic rollback verification uses the same deterministic policy, while explicit rollback retries its final verification inside the existing whole-operation timeout;
 - if the explicit rollback deadline expires during a retry or retry delay, the durable rollback operation remains `STARTED` and the existing fail-closed recovery/reconciliation guard continues to apply;
 - retry configuration remains deploy-mcp orchestration policy and does not alter `RemoteExecutionPort`, SSH/SFTP behavior, raw command exposure, or remote-exec-mcp task semantics.
@@ -228,9 +228,11 @@ Verification retry acceptance criteria:
 Timeout acceptance criteria:
 
 - deployment-step deadlines are configured in deploy-mcp and wrap capability preflight, staging upload, named deployment tasks, and automatic rollback tasks without adding SSH/SFTP behavior to the deployment domain;
-- a timed-out deployment step closes its durable step attempt as `FAILED` with stable `operation_timed_out`, then follows the existing pre/post-mutation rollback rules;
+- a timed-out deployment step closes its durable step attempt as `FAILED` with stable `operation_timed_out`;
+- pre-mutation timeout before the live `INSTALL` boundary can terminate as `FAILED`, while `INSTALL`/`RESTART`/`VERIFY` timeout retains the current non-terminal deployment state and does not immediately start automatic rollback because remote completion is unknown;
+- automatic rollback timeout retains `ROLLING_BACK` and stops subsequent rollback tasks instead of claiming `ROLLBACK_FAILED` while the timed-out remote action may still finish;
 - explicit rollback has a whole-operation deadline after the durable operation enters `STARTED`; a timeout leaves that operation `STARTED` because remote mutation state is unknown;
-- the existing cross-process mutation guard therefore blocks further deploy/rollback mutation until startup recovery/manual reconciliation resolves the timed-out rollback;
+- the existing cross-process mutation guards therefore block further deploy/rollback mutation until startup recovery/manual reconciliation resolves uncertain timed-out mutation state;
 - timeout configuration is bounded and has safe defaults; timeout handling never exposes raw commands, credentials, or remote paths through new MCP inputs.
 
 Startup recovery acceptance criteria:
