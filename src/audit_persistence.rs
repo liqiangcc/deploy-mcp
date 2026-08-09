@@ -370,6 +370,9 @@ mod tests {
     fn empty_history_is_stable_for_unknown_deployment() {
         let repository = SqliteAuditRepository::in_memory().unwrap();
         let id = DeploymentId::new("missing").unwrap();
-        assert!(repository.events_for_deployment(&id, 100).unwrap().is_empty());
+        assert!(repository
+            .events_for_deployment(&id, 100)
+            .unwrap()
+            .is_empty());
     }
 }
