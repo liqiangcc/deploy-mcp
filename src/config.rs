@@ -47,8 +47,7 @@ impl Default for RuntimeConfig {
             verification_max_attempts: default_verification_max_attempts(),
             verification_retry_delay_ms: default_verification_retry_delay_ms(),
             rollback_reference_retention_days: default_rollback_reference_retention_days(),
-            rollback_reference_cleanup_batch_size:
-                default_rollback_reference_cleanup_batch_size(),
+            rollback_reference_cleanup_batch_size: default_rollback_reference_cleanup_batch_size(),
         }
     }
 }
