@@ -12,9 +12,8 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::domain::{
     ApplicationId, Artifact, Deployment, DeploymentId, DeploymentState, EnvironmentId,
-    RecoveryAcknowledgement, RecoveryAcknowledgementRecord, RecoveryDisposition,
-    RecoveryIncident, RecoverySubjectKind, RollbackOperation, RollbackOperationId,
-    RollbackOperationState,
+    RecoveryAcknowledgement, RecoveryAcknowledgementRecord, RecoveryDisposition, RecoveryIncident,
+    RecoverySubjectKind, RollbackOperation, RollbackOperationId, RollbackOperationState,
 };
 use crate::ports::{RecoveryRepository, RepositoryError, RepositoryResult};
 
@@ -37,16 +36,7 @@ type IncidentRow = (
     i64,
     Option<i64>,
 );
-type AcknowledgementRow = (
-    i64,
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-    i64,
-);
+type AcknowledgementRow = (i64, String, String, String, String, String, String, i64);
 
 pub struct SqliteRecoveryRepository {
     connection: Connection,
