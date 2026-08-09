@@ -7,7 +7,10 @@ use tokio::io::AsyncReadExt;
 use tokio::time::{sleep, timeout, Duration};
 use uuid::Uuid;
 
-use super::{preflight_remote_capabilities, DeploymentLockManager, RemotePreflightError};
+use super::{
+    artifact_access::resolve_allowed_artifact_path, preflight_remote_capabilities,
+    DeploymentLockManager, RemotePreflightError,
+};
 use crate::config::{Config, EnvironmentConfig};
 use crate::domain::{
     ApplicationId, Artifact, Deployment, DeploymentId, DeploymentPlan, DeploymentState,
@@ -136,7 +139,12 @@ where
 
         self.reject_durable_conflict(&request.application, &request.environment)?;
 
-        let artifact = load_artifact(&request.version, &request.artifact_path).await?;
+        let artifact_path = resolve_allowed_artifact_path(
+            &self.config.local_artifacts,
+            &request.artifact_path,
+        )
+        .await?;
+        let artifact = load_artifact(&request.version, &artifact_path).await?;
         let deployment_id = DeploymentId::new(Uuid::new_v4().to_string()).map_err(|error| {
             AppError::new(
                 ErrorCode::InvalidStateTransition,
@@ -216,7 +224,7 @@ where
             .execute_upload(
                 deployment.id(),
                 &environment,
-                &request.artifact_path,
+                &artifact_path,
                 deployment.artifact().size_bytes(),
             )
             .await?
@@ -834,6 +842,9 @@ mod tests {
     const CONFIG: &str = r#"
 remote_exec:
   command: remote-exec-mcp
+local_artifacts:
+  allowed_roots:
+    - __TEST_ARTIFACT_ROOT__
 applications:
   demo:
     artifact_type: jar
@@ -899,9 +910,13 @@ applications:
             .map(str::to_owned)
             .collect()),
         );
+        let canonical_artifact = std::fs::canonicalize(artifact_path)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         fake.set_upload_result(
             "test-server",
-            artifact_path,
+            &canonical_artifact,
             "/opt/staging/demo.jar",
             true,
             Ok(RemoteTransferResult {
@@ -931,8 +946,15 @@ applications:
         }
     }
 
+    fn config_with_root(root: &str) -> Arc<Config> {
+        Arc::new(
+            Config::from_yaml(&CONFIG.replace("__TEST_ARTIFACT_ROOT__", root)).unwrap(),
+        )
+    }
+
     fn config() -> Arc<Config> {
-        Arc::new(Config::from_yaml(CONFIG).unwrap())
+        let root = std::env::temp_dir().to_string_lossy().into_owned();
+        config_with_root(&root)
     }
 
     fn repository() -> Arc<Mutex<SqliteDeploymentRepository>> {
@@ -1114,6 +1136,22 @@ applications:
         assert!(!fake.calls().iter().any(|call| {
             matches!(call, FakeRemoteCall::RunTask { task, .. } if task == "demo-rollback")
         }));
+    }
+
+    #[tokio::test]
+    async fn artifact_outside_allowlist_is_rejected_before_remote_work() {
+        let allowed = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let artifact_path = outside.path().join("demo.jar");
+        std::fs::write(&artifact_path, b"jar-content").unwrap();
+        let artifact_path = artifact_path.to_string_lossy().into_owned();
+        let fake = FakeRemoteExecution::default();
+        let root = allowed.path().to_string_lossy().into_owned();
+        let service = DeployService::new(config_with_root(&root), Arc::new(fake.clone()), repository());
+
+        let error = service.deploy(request(&artifact_path)).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::ArtifactPathNotAllowed);
+        assert!(fake.calls().is_empty());
     }
 
     #[tokio::test]
