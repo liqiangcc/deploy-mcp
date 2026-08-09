@@ -171,6 +171,7 @@ async fn deploy_success(fixture: &Fixture) -> DeploymentExecutionResult {
             environment: "test".to_owned(),
             version: "1.0.0".to_owned(),
             artifact_path: fixture.artifact_path.clone(),
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -340,6 +341,7 @@ async fn started_rollback_blocks_deploy_from_a_separate_application_instance() {
             environment: "test".to_owned(),
             version: "2.0.0".to_owned(),
             artifact_path: fixture.artifact_path.clone(),
+            idempotency_key: None,
         })
         .await
         .unwrap_err();
