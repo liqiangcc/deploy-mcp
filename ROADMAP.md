@@ -183,7 +183,7 @@ Acceptance criteria:
 - [x] operator reconciliation/acknowledgement for unresolved recovery incidents
 - [x] deployment-level structured audit/history
 - [x] timeouts at deployment-step and explicit-rollback-operation level
-- [ ] deterministic verification retry policy
+- [x] deterministic verification retry policy
 - [ ] rollback-reference retention/cleanup policy
 - [ ] local artifact-path allowlist
 - [ ] threat-model regression tests
@@ -214,6 +214,16 @@ Structured audit/history acceptance criteria:
 - the projection survives SQLite connection/process reopen because it reconstructs from committed durable source facts rather than process-local logs;
 - same-millisecond events are deterministically ordered for rendering, but the tie-break order is not treated as additional causal/state-machine semantics;
 - a dedicated cross-repository test proves deployment -> rollback STARTED -> crash recovery -> manual incident -> operator acknowledgement -> database reopen as one recoverable structured timeline.
+
+Verification retry acceptance criteria:
+
+- only the configured `health_check` verification task is retried; precheck, upload, backup, install, restart, and restore tasks remain single-attempt to avoid duplicating side effects;
+- `verification_max_attempts` includes the first attempt and is bounded to `1..=10`; `verification_retry_delay_ms` is a fixed `0..=60000` millisecond delay with no jitter, randomness, or exponential backoff;
+- every deployment or automatic-rollback verification attempt is recorded as its own durable `DeploymentStep::Verify` step attempt, preserving failed attempts before a later success;
+- a successful verification attempt stops immediately; exhaustion returns the final verification failure and follows the existing deployment or rollback failure state machine without inventing a new retry state;
+- automatic rollback verification uses the same deterministic policy, while explicit rollback retries its final verification inside the existing whole-operation timeout;
+- if the explicit rollback deadline expires during a retry or retry delay, the durable rollback operation remains `STARTED` and the existing fail-closed recovery/reconciliation guard continues to apply;
+- retry configuration remains deploy-mcp orchestration policy and does not alter `RemoteExecutionPort`, SSH/SFTP behavior, raw command exposure, or remote-exec-mcp task semantics.
 
 Timeout acceptance criteria:
 

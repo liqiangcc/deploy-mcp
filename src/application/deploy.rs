@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
-use tokio::time::{timeout, Duration};
+use tokio::time::{sleep, timeout, Duration};
 use uuid::Uuid;
 
 use super::{preflight_remote_capabilities, DeploymentLockManager, RemotePreflightError};
@@ -282,12 +282,10 @@ where
 
         self.transition(&mut deployment, DeploymentState::Verifying)?;
         if let Some(failure) = self
-            .execute_named_task(
+            .execute_verification(
                 deployment.id(),
-                DeploymentStep::Verify,
                 &environment.target,
                 &environment.tasks.health_check,
-                BTreeMap::new(),
                 ErrorCode::VerificationFailed,
                 "health-check task failed",
             )
@@ -428,6 +426,37 @@ where
         Ok(failure)
     }
 
+    async fn execute_verification(
+        &self,
+        deployment_id: &DeploymentId,
+        target: &str,
+        task: &str,
+        failure_code: ErrorCode,
+        action: &str,
+    ) -> AppResult<Option<DeploymentFailure>> {
+        let max_attempts = self.config.runtime.verification_max_attempts;
+        let retry_delay_ms = self.config.runtime.verification_retry_delay_ms;
+        for attempt in 1..=max_attempts {
+            let failure = self
+                .execute_named_task(
+                    deployment_id,
+                    DeploymentStep::Verify,
+                    target,
+                    task,
+                    BTreeMap::new(),
+                    failure_code,
+                    action,
+                )
+                .await?;
+            match failure {
+                None => return Ok(None),
+                Some(failure) if attempt == max_attempts => return Ok(Some(failure)),
+                Some(_) => sleep(Duration::from_millis(retry_delay_ms)).await,
+            }
+        }
+        unreachable!("validated verification policy always has at least one attempt")
+    }
+
     async fn finish_primary_failure(
         &self,
         mut deployment: Deployment,
@@ -506,12 +535,10 @@ where
             return Ok(Some(failure));
         }
 
-        self.execute_named_task(
+        self.execute_verification(
             deployment_id,
-            DeploymentStep::Verify,
             &environment.target,
             &environment.tasks.health_check,
-            BTreeMap::new(),
             ErrorCode::RollbackFailed,
             "rollback verification task failed",
         )

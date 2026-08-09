@@ -29,6 +29,10 @@ pub struct RuntimeConfig {
     pub deployment_step_timeout_ms: u64,
     #[serde(default = "default_explicit_rollback_timeout_ms")]
     pub explicit_rollback_timeout_ms: u64,
+    #[serde(default = "default_verification_max_attempts")]
+    pub verification_max_attempts: u32,
+    #[serde(default = "default_verification_retry_delay_ms")]
+    pub verification_retry_delay_ms: u64,
 }
 
 impl Default for RuntimeConfig {
@@ -36,6 +40,8 @@ impl Default for RuntimeConfig {
         Self {
             deployment_step_timeout_ms: default_deployment_step_timeout_ms(),
             explicit_rollback_timeout_ms: default_explicit_rollback_timeout_ms(),
+            verification_max_attempts: default_verification_max_attempts(),
+            verification_retry_delay_ms: default_verification_retry_delay_ms(),
         }
     }
 }
@@ -46,6 +52,14 @@ const fn default_deployment_step_timeout_ms() -> u64 {
 
 const fn default_explicit_rollback_timeout_ms() -> u64 {
     300_000
+}
+
+const fn default_verification_max_attempts() -> u32 {
+    3
+}
+
+const fn default_verification_retry_delay_ms() -> u64 {
+    1_000
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -114,6 +128,8 @@ impl Config {
             "runtime.explicit_rollback_timeout_ms",
             self.runtime.explicit_rollback_timeout_ms,
         )?;
+        validate_verification_attempts(self.runtime.verification_max_attempts)?;
+        validate_verification_retry_delay(self.runtime.verification_retry_delay_ms)?;
 
         if self.applications.is_empty() {
             return Err(AppError::invalid_configuration(
@@ -217,6 +233,26 @@ fn validate_timeout(kind: &str, value: u64) -> AppResult<()> {
     if value == 0 || value > MAX_TIMEOUT_MS {
         return Err(AppError::invalid_configuration(format!(
             "{kind} must be between 1 and {MAX_TIMEOUT_MS} milliseconds"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_verification_attempts(value: u32) -> AppResult<()> {
+    const MAX_ATTEMPTS: u32 = 10;
+    if value == 0 || value > MAX_ATTEMPTS {
+        return Err(AppError::invalid_configuration(format!(
+            "runtime.verification_max_attempts must be between 1 and {MAX_ATTEMPTS}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_verification_retry_delay(value: u64) -> AppResult<()> {
+    const MAX_DELAY_MS: u64 = 60_000;
+    if value > MAX_DELAY_MS {
+        return Err(AppError::invalid_configuration(format!(
+            "runtime.verification_retry_delay_ms must be between 0 and {MAX_DELAY_MS} milliseconds"
         )));
     }
     Ok(())

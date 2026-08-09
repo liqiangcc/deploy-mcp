@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
-use tokio::time::{timeout, Duration};
+use tokio::time::{sleep, timeout, Duration};
 use uuid::Uuid;
 
 use super::DeploymentLockManager;
@@ -192,15 +192,7 @@ where
             {
                 return Some(failure);
             }
-            if let Some(failure) = self
-                .run_task(
-                    &reference,
-                    reference.health_check_task(),
-                    BTreeMap::new(),
-                    "rollback verification task failed",
-                )
-                .await
-            {
+            if let Some(failure) = self.run_verification_with_retry(&reference).await {
                 return Some(failure);
             }
             None
@@ -302,6 +294,30 @@ where
                 error,
             )),
         }
+    }
+
+    async fn run_verification_with_retry(
+        &self,
+        reference: &RollbackReference,
+    ) -> Option<RollbackFailure> {
+        let max_attempts = self.config.runtime.verification_max_attempts;
+        let retry_delay_ms = self.config.runtime.verification_retry_delay_ms;
+        for attempt in 1..=max_attempts {
+            let failure = self
+                .run_task(
+                    reference,
+                    reference.health_check_task(),
+                    BTreeMap::new(),
+                    "rollback verification task failed",
+                )
+                .await;
+            match failure {
+                None => return None,
+                Some(failure) if attempt == max_attempts => return Some(failure),
+                Some(_) => sleep(Duration::from_millis(retry_delay_ms)).await,
+            }
+        }
+        unreachable!("validated verification policy always has at least one attempt")
     }
 
     fn finish_failed(
