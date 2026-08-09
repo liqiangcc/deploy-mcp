@@ -416,10 +416,7 @@ applications:
 
     #[test]
     fn rejects_unsafe_local_artifact_roots() {
-        let relative = VALID_CONFIG.replace(
-            "/var/lib/deploy-mcp/artifacts",
-            "relative/artifacts",
-        );
+        let relative = VALID_CONFIG.replace("/var/lib/deploy-mcp/artifacts", "relative/artifacts");
         let error = Config::from_yaml(&relative).unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidConfiguration);
         assert!(error.message.contains("allowed root must be absolute"));
