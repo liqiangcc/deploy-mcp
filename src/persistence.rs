@@ -611,8 +611,7 @@ mod tests {
     use tempfile::tempdir;
 
     const SHA256: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    const OTHER_SHA256: &str =
-        "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+    const OTHER_SHA256: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
 
     fn deployment(id: &str) -> Deployment {
         Deployment::new(
@@ -806,9 +805,7 @@ mod tests {
             EnvironmentId::new("test").unwrap(),
             Artifact::new("1.0.0", 42, OTHER_SHA256).unwrap(),
         );
-        let error = repository
-            .reserve(&changed, Some("request-2"))
-            .unwrap_err();
+        let error = repository.reserve(&changed, Some("request-2")).unwrap_err();
         assert!(matches!(
             error,
             RepositoryError::ArtifactVersionConflict { .. }
