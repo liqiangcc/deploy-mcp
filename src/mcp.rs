@@ -16,7 +16,7 @@ use crate::application::{
 };
 use crate::domain::{Deployment, RollbackOperation};
 use crate::error::AppError;
-use crate::ports::{DeploymentTransition, StepAttemptRecord, StepAttemptStatus};
+use crate::ports::{AuditEvent, DeploymentTransition, StepAttemptRecord, StepAttemptStatus};
 
 #[derive(Clone)]
 pub struct DeployMcp {
@@ -42,6 +42,13 @@ pub struct DeployApplicationArgs {
 #[serde(deny_unknown_fields)]
 pub struct GetDeploymentArgs {
     pub deployment_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetDeploymentHistoryArgs {
+    pub deployment_id: String,
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -101,6 +108,25 @@ impl DeployMcp {
     ) -> CallToolResult {
         match self.application.get_deployment(&args.deployment_id) {
             Ok(details) => CallToolResult::structured(details_json(&details)),
+            Err(error) => tool_error(error),
+        }
+    }
+
+    #[tool(
+        description = "Get a bounded structured audit timeline for one deployment. The read-only projection combines durable deployment transitions/step attempts, rollback lifecycle, and recovery/reconciliation facts without exposing remote paths, task names, credentials, or shell controls."
+    )]
+    async fn get_deployment_history(
+        &self,
+        Parameters(args): Parameters<GetDeploymentHistoryArgs>,
+    ) -> CallToolResult {
+        match self
+            .application
+            .get_deployment_history(&args.deployment_id, args.limit.unwrap_or(200))
+        {
+            Ok(events) => CallToolResult::structured(json!({
+                "deployment_id": args.deployment_id,
+                "events": events.iter().map(audit_event_json).collect::<Vec<_>>()
+            })),
             Err(error) => tool_error(error),
         }
     }
@@ -209,6 +235,21 @@ fn details_json(details: &DeploymentDetails) -> Value {
     })
 }
 
+fn audit_event_json(event: &AuditEvent) -> Value {
+    json!({
+        "deployment_id": event.deployment_id.as_str(),
+        "application": event.application,
+        "environment": event.environment,
+        "subject": {
+            "kind": event.subject_kind.as_str(),
+            "id": event.subject_id,
+        },
+        "event": event.kind.as_str(),
+        "attributes": event.attributes,
+        "occurred_at_unix_ms": event.occurred_at_unix_ms,
+    })
+}
+
 fn transition_json(transition: &DeploymentTransition) -> Value {
     json!({
         "from": transition.from,
@@ -304,6 +345,16 @@ mod tests {
         ) -> AppResult<Vec<DeploymentDetails>> {
             Ok(Vec::new())
         }
+        fn get_deployment_history(
+            &self,
+            deployment_id: &str,
+            _limit: usize,
+        ) -> AppResult<Vec<AuditEvent>> {
+            Err(AppError::new(
+                ErrorCode::UnknownDeployment,
+                format!("unknown deployment: {deployment_id}"),
+            ))
+        }
         async fn rollback_deployment(&self, deployment_id: &str) -> AppResult<RollbackOutcome> {
             Err(AppError::new(
                 ErrorCode::RollbackUnavailable,
@@ -349,6 +400,15 @@ mod tests {
         let error = serde_json::from_value::<DeployApplicationArgs>(json!({
             "application": "demo", "environment": "test", "version": "1.0.0",
             "artifact_path": "/tmp/demo.jar", "shell": "systemctl restart demo", "ssh_password": "secret"
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn history_tool_rejects_remote_execution_parameters() {
+        let error = serde_json::from_value::<GetDeploymentHistoryArgs>(json!({
+            "deployment_id": "d1", "limit": 100, "backup_path": "/tmp/attacker.jar", "task": "arbitrary-task"
         }))
         .unwrap_err();
         assert!(error.to_string().contains("unknown field"));
