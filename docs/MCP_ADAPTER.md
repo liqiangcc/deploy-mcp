@@ -10,10 +10,10 @@ AI Agent
   -> DeployMcp
   -> DeploymentApi
   -> DeploymentApplication / DeployService / RollbackService
-  -> DeploymentRepository + RollbackRepository + RemoteExecutionPort
+  -> DeploymentRepository + RollbackRepository + AuditRepository + RemoteExecutionPort
 ```
 
-The MCP layer does not own deployment state transitions, rollback validity rules, SSH/SFTP, remote command construction, filesystem authorization, or task authorization.
+The MCP layer does not own deployment state transitions, rollback validity rules, SSH/SFTP, remote command construction, filesystem authorization, task authorization, or audit reconstruction rules.
 
 ## Current tools
 
@@ -30,11 +30,14 @@ Input:
   "application": "demo-service",
   "environment": "test",
   "version": "1.2.3",
-  "artifact_path": "/local/artifacts/demo-service-1.2.3.jar"
+  "artifact_path": "/local/artifacts/demo-service-1.2.3.jar",
+  "idempotency_key": "release-20260809-demo-123"
 }
 ```
 
 The local `artifact_path` is the only path accepted from the caller. Remote staging/install/backup paths remain declarative server configuration.
+
+`idempotency_key` is optional. When supplied, it identifies one durable deployment intent; exact accepted retries return the original deployment without repeating remote work.
 
 The input schema rejects undeclared fields. Raw shell, SSH credentials, remote service names, and remote deployment paths are therefore not part of the MCP capability surface.
 
@@ -43,6 +46,25 @@ A successful deployment response also reports whether a durable explicit-rollbac
 ### `get_deployment`
 
 Read-only. Returns the durable deployment aggregate plus state-transition history and step-attempt history.
+
+### `get_deployment_history`
+
+Read-only. Returns one bounded structured timeline correlated to a deployment across deployment execution, explicit rollback, startup recovery, and operator reconciliation.
+
+Input:
+
+```json
+{
+  "deployment_id": "deployment-uuid",
+  "limit": 200
+}
+```
+
+`limit` defaults to 200 and is bounded to `1..=500` by the application layer.
+
+The tool is backed by the application-owned read-only `AuditRepository` port. `DeployMcp` does not query SQLite directly and does not reconstruct history from logs.
+
+The normal AI-facing projection intentionally excludes rollback targets, backup/install paths, rollback/restart/health task names, credentials, shell fragments, and operator reconciliation evidence. See `docs/STRUCTURED_AUDIT_HISTORY.md` for the event contract and observation-model boundary.
 
 ### `list_deployments`
 
@@ -104,7 +126,9 @@ Within one process, `DeploymentLockManager` serializes `(application, environmen
 
 SQLite constraints/triggers are the durable authority. Process-local locks are an early rejection optimization, not the correctness boundary.
 
-A process crash that leaves a rollback operation in `STARTED` requires the Phase 7 startup-recovery policy; until recovered, the durable guard intentionally fails closed.
+A process crash that leaves a rollback operation in `STARTED` is handled by the Phase 7 startup-recovery policy; until recovered/reconciled, the durable guard intentionally fails closed.
+
+The audit/history projection is read-only and does not participate in mutation exclusion.
 
 ## Error contract
 
@@ -137,19 +161,26 @@ The default config path is `config/example.yaml`. The default SQLite path is `de
 At startup the composition root:
 
 1. loads and validates deploy-mcp configuration;
-2. opens the SQLite deployment repository;
-3. opens the SQLite rollback repository against the same database;
-4. starts the configured `remote-exec-mcp` child process;
-5. builds `DeploymentApplication` with deployment and rollback application services;
-6. exposes it through `DeployMcp` over stdio.
+2. runs fail-closed startup recovery against the SQLite database before remote execution is started;
+3. opens the SQLite deployment repository;
+4. opens the SQLite rollback repository against the same database;
+5. opens the read-only SQLite audit projection against the same database;
+6. starts the configured `remote-exec-mcp` child process;
+7. builds `DeploymentApplication` with deployment, rollback, and audit ports;
+8. exposes it through `DeployMcp` over stdio.
+
+The separate `deploy-mcp-recovery` administrative CLI owns operator acknowledgement. The normal MCP server can observe the resulting acknowledgement through structured history but cannot create or clear one.
 
 ## Safety evidence
 
-Dedicated explicit-rollback tests cover:
+Dedicated tests cover:
 
 - successful rollback uses the deployment-bound capability snapshot and consumes the reference;
 - failed rollback leaves the reference active and can be retried;
 - a newer deployment record invalidates historical rollback before any remote call;
 - a started rollback blocks a deployment from a separate application/repository instance sharing the same SQLite database;
 - environment contract drift rejects rollback before any remote call;
-- the MCP rollback schema rejects caller-supplied remote paths and arbitrary task names.
+- the MCP rollback schema rejects caller-supplied remote paths and arbitrary task names;
+- the MCP history schema accepts only deployment id plus a bounded limit and rejects caller-supplied remote execution fields;
+- structured history correlates deployment, rollback operation, recovery incident, and operator acknowledgement across separate SQLite repository instances and survives database reopen;
+- normal audit attributes do not expose rollback target/path/task details or reconciliation evidence.
