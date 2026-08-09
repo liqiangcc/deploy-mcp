@@ -177,8 +177,8 @@ Acceptance criteria:
 
 ## Phase 7 — Production hardening for v0.1
 
-- [ ] idempotency key support
-- [ ] reject same version with changed checksum
+- [x] idempotency key support
+- [x] reject same version with changed checksum
 - [x] startup recovery policy for non-terminal deployments and `STARTED` rollback operations
 - [x] operator reconciliation/acknowledgement for unresolved recovery incidents
 - [ ] deployment-level structured audit/history
@@ -189,6 +189,19 @@ Acceptance criteria:
 - [ ] threat-model regression tests
 - [ ] disposable integration test using a real remote-exec-mcp process or equivalent protocol fixture
 - [ ] README/config/client setup documentation
+
+Deployment identity acceptance criteria:
+
+- `deploy_application` accepts an optional idempotency key of 1..=128 bytes with no leading/trailing whitespace or control characters;
+- one SQLite-global idempotency key is durably bound to one deployment intent identified by application, environment, version, artifact SHA-256, and artifact size;
+- an exact retry after the original active mutation has finished returns the original durable Deployment with `idempotent_replay = true` and performs no additional remote work;
+- a concurrent retry while an application/environment mutation is still active remains governed by the existing mutation lease and may return `conflicting_deployment` rather than joining the running orchestration;
+- reusing one idempotency key with a changed durable request identity fails with stable `idempotency_conflict` before remote work;
+- for one application/environment, a version string is immutable with respect to artifact SHA-256 and size; changed bytes fail with stable `artifact_version_conflict` even when a new idempotency key is supplied;
+- a new deployment of the same version and exactly the same artifact remains an explicit redeployment when a new key (or no key) is used and no mutation guard is active;
+- SQLite `BEGIN IMMEDIATE` reservation transactions serialize idempotency lookup, version-identity validation, deployment insertion, and key binding across repository/process instances;
+- idempotency/version identity does not weaken active-deployment, explicit-rollback, or unresolved-recovery mutation guards;
+- MCP continues to deny undeclared raw execution fields; `idempotency_key` cannot control remote paths, commands, tasks, services, or credentials.
 
 Startup recovery acceptance criteria:
 
