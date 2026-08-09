@@ -413,9 +413,7 @@ fn disposition_name(disposition: RecoveryDisposition) -> &'static str {
 fn parse_disposition(value: &str) -> RepositoryResult<RecoveryDisposition> {
     match value {
         "auto_resolved" => Ok(RecoveryDisposition::AutoResolved),
-        "manual_reconciliation_required" => {
-            Ok(RecoveryDisposition::ManualReconciliationRequired)
-        }
+        "manual_reconciliation_required" => Ok(RecoveryDisposition::ManualReconciliationRequired),
         other => Err(RepositoryError::CorruptData(format!(
             "unknown recovery disposition: {other}"
         ))),
