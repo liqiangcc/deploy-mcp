@@ -131,12 +131,16 @@ struct Fixture {
     application: Application,
 }
 
-fn config(step_timeout_ms: u64, rollback_timeout_ms: u64) -> Arc<Config> {
+fn config(step_timeout_ms: u64, rollback_timeout_ms: u64, artifact_root: &Path) -> Arc<Config> {
+    let artifact_root = serde_json::to_string(artifact_root.to_string_lossy().as_ref()).unwrap();
     Arc::new(
         Config::from_yaml(&format!(
             r#"
 remote_exec:
   command: remote-exec-mcp
+local_artifacts:
+  allowed_roots:
+    - {artifact_root}
 runtime:
   deployment_step_timeout_ms: {step_timeout_ms}
   explicit_rollback_timeout_ms: {rollback_timeout_ms}
@@ -181,7 +185,7 @@ fn fixture(step_timeout_ms: u64, rollback_timeout_ms: u64) -> Fixture {
     let artifact = directory.path().join("demo.jar");
     fs::write(&artifact, b"timeout-test-jar").unwrap();
     let artifact_path = artifact.to_string_lossy().into_owned();
-    let config = config(step_timeout_ms, rollback_timeout_ms);
+    let config = config(step_timeout_ms, rollback_timeout_ms, directory.path());
     let remote = ControlledRemote::default();
     let application = application_for_database(Arc::clone(&config), remote.clone(), &database_path);
     Fixture {
