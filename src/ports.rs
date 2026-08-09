@@ -10,9 +10,9 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::domain::{
-    Deployment, DeploymentId, DeploymentState, DeploymentStep, RecoveryDisposition,
-    RecoveryIncident, RollbackOperation, RollbackOperationId, RollbackOperationState,
-    RollbackReference,
+    Deployment, DeploymentId, DeploymentState, DeploymentStep, RecoveryAcknowledgement,
+    RecoveryAcknowledgementRecord, RecoveryDisposition, RecoveryIncident, RollbackOperation,
+    RollbackOperationId, RollbackOperationState, RollbackReference,
 };
 
 pub type RemoteExecutionResult<T> = Result<T, RemoteExecutionError>;
@@ -159,8 +159,8 @@ pub trait RollbackRepository: Send {
 }
 
 /// Durable recovery persistence is intentionally separate from normal deployment
-/// and rollback repositories. Startup recovery is an administrative safety path,
-/// not another branch in the deployment state machine.
+/// and rollback repositories. Startup recovery and operator acknowledgement are
+/// administrative safety paths, not branches in the deployment state machine.
 pub trait RecoveryRepository: Send {
     fn interrupted_deployments(&self) -> RepositoryResult<Vec<Deployment>>;
     fn started_rollback_operations(&self) -> RepositoryResult<Vec<RollbackOperation>>;
@@ -176,6 +176,15 @@ pub trait RecoveryRepository: Send {
         reason: &str,
     ) -> RepositoryResult<Option<RecoveryIncident>>;
     fn unresolved_incidents(&self) -> RepositoryResult<Vec<RecoveryIncident>>;
+    fn get_incident(&self, incident_id: u64) -> RepositoryResult<Option<RecoveryIncident>>;
+    fn acknowledge_incident(
+        &mut self,
+        acknowledgement: &RecoveryAcknowledgement,
+    ) -> RepositoryResult<RecoveryAcknowledgementRecord>;
+    fn acknowledgement(
+        &self,
+        incident_id: u64,
+    ) -> RepositoryResult<Option<RecoveryAcknowledgementRecord>>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -200,6 +209,10 @@ pub enum RepositoryError {
     },
     #[error("rollback operation state conflict: {0}")]
     RollbackOperationConflict(String),
+    #[error("recovery incident not found: {0}")]
+    RecoveryIncidentNotFound(u64),
+    #[error("recovery incident conflict: {0}")]
+    RecoveryIncidentConflict(String),
     #[error("corrupt repository data: {0}")]
     CorruptData(String),
     #[error("invalid step-attempt completion")]

@@ -8,7 +8,10 @@ pub use deployment::{
     EnvironmentId,
 };
 pub use plan::{DeploymentPlan, DeploymentStep, RollbackBoundary};
-pub use recovery::{RecoveryDisposition, RecoveryIncident, RecoverySubjectKind};
+pub use recovery::{
+    RecoveryAcknowledgement, RecoveryAcknowledgementRecord, RecoveryDisposition, RecoveryError,
+    RecoveryIncident, RecoverySubjectKind,
+};
 pub use rollback::{
     RollbackError, RollbackOperation, RollbackOperationId, RollbackOperationState,
     RollbackReference, RollbackReferenceState,

@@ -1,4 +1,7 @@
-use crate::domain::{RecoveryDisposition, RecoveryIncident};
+use crate::domain::{
+    RecoveryAcknowledgement, RecoveryAcknowledgementRecord, RecoveryDisposition, RecoveryIncident,
+    RecoverySubjectKind,
+};
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::ports::{RecoveryRepository, RepositoryError};
 
@@ -26,7 +29,7 @@ impl StartupRecoveryReport {
 /// boundary, an interrupted deployment can be failed safely. After that
 /// boundary, the deployment/rollback execution is failed but a durable,
 /// unresolved recovery incident keeps the environment fail-closed until an
-/// operator-level reconciliation workflow is implemented and completed.
+/// operator-level acknowledgement proves that a human inspected the state.
 pub struct StartupRecoveryService<R>
 where
     R: RecoveryRepository,
@@ -93,6 +96,78 @@ where
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryAcknowledgementRequest {
+    pub incident_id: u64,
+    pub application: String,
+    pub environment: String,
+    pub subject_kind: RecoverySubjectKind,
+    pub subject_id: String,
+    pub operator: String,
+    pub evidence: String,
+}
+
+/// Administrative recovery use case. This service deliberately has no
+/// RemoteExecutionPort dependency: the operator must inspect the remote system
+/// outside this acknowledgement path, then submit exact incident identity plus
+/// durable evidence of that inspection.
+pub struct RecoveryAdminService<R>
+where
+    R: RecoveryRepository,
+{
+    repository: R,
+}
+
+impl<R> RecoveryAdminService<R>
+where
+    R: RecoveryRepository,
+{
+    pub fn new(repository: R) -> Self {
+        Self { repository }
+    }
+
+    pub fn unresolved_incidents(&self) -> AppResult<Vec<RecoveryIncident>> {
+        self.repository
+            .unresolved_incidents()
+            .map_err(repository_error)
+    }
+
+    pub fn acknowledge(
+        &mut self,
+        request: RecoveryAcknowledgementRequest,
+    ) -> AppResult<RecoveryAcknowledgementRecord> {
+        let acknowledgement = RecoveryAcknowledgement::new(
+            request.incident_id,
+            request.application,
+            request.environment,
+            request.subject_kind,
+            request.subject_id,
+            request.operator,
+            request.evidence,
+        )
+        .map_err(|error| AppError::new(ErrorCode::InvalidRequest, error.to_string()))?;
+
+        self.repository
+            .acknowledge_incident(&acknowledgement)
+            .map_err(repository_error)
+    }
+
+    pub fn acknowledgement(
+        &self,
+        incident_id: u64,
+    ) -> AppResult<Option<RecoveryAcknowledgementRecord>> {
+        if incident_id == 0 {
+            return Err(AppError::new(
+                ErrorCode::InvalidRequest,
+                "recovery incident id must be greater than zero",
+            ));
+        }
+        self.repository
+            .acknowledgement(incident_id)
+            .map_err(repository_error)
+    }
+}
+
 fn deployment_recovery_reason(
     state: crate::domain::DeploymentState,
     disposition: RecoveryDisposition,
@@ -108,7 +183,16 @@ fn deployment_recovery_reason(
 }
 
 fn repository_error(error: RepositoryError) -> AppError {
-    AppError::new(ErrorCode::PersistenceFailed, error.to_string())
+    match error {
+        RepositoryError::RecoveryIncidentNotFound(incident_id) => AppError::new(
+            ErrorCode::UnknownRecoveryIncident,
+            format!("unknown recovery incident: {incident_id}"),
+        ),
+        RepositoryError::RecoveryIncidentConflict(message) => {
+            AppError::new(ErrorCode::RecoveryIncidentConflict, message)
+        }
+        other => AppError::new(ErrorCode::PersistenceFailed, other.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -127,6 +211,7 @@ mod tests {
         deployments: Vec<Deployment>,
         rollbacks: Vec<RollbackOperation>,
         incidents: Vec<RecoveryIncident>,
+        acknowledgements: Vec<RecoveryAcknowledgementRecord>,
     }
 
     impl RecoveryRepository for FakeRecoveryRepository {
@@ -189,6 +274,34 @@ mod tests {
                 .cloned()
                 .collect())
         }
+
+        fn get_incident(&self, incident_id: u64) -> RepositoryResult<Option<RecoveryIncident>> {
+            Ok(self
+                .incidents
+                .iter()
+                .find(|incident| incident.id() == incident_id)
+                .cloned())
+        }
+
+        fn acknowledge_incident(
+            &mut self,
+            acknowledgement: &RecoveryAcknowledgement,
+        ) -> RepositoryResult<RecoveryAcknowledgementRecord> {
+            let record = RecoveryAcknowledgementRecord::rehydrate(acknowledgement.clone(), 2);
+            self.acknowledgements.push(record.clone());
+            Ok(record)
+        }
+
+        fn acknowledgement(
+            &self,
+            incident_id: u64,
+        ) -> RepositoryResult<Option<RecoveryAcknowledgementRecord>> {
+            Ok(self
+                .acknowledgements
+                .iter()
+                .find(|record| record.acknowledgement().incident_id() == incident_id)
+                .cloned())
+        }
     }
 
     fn deployment(state: DeploymentState) -> Deployment {
@@ -249,5 +362,22 @@ mod tests {
             report.incidents()[0].subject_kind(),
             RecoverySubjectKind::RollbackOperation
         );
+    }
+
+    #[test]
+    fn admin_acknowledgement_requires_non_empty_evidence() {
+        let mut service = RecoveryAdminService::new(FakeRecoveryRepository::default());
+        let error = service
+            .acknowledge(RecoveryAcknowledgementRequest {
+                incident_id: 1,
+                application: "demo".to_owned(),
+                environment: "test".to_owned(),
+                subject_kind: RecoverySubjectKind::Deployment,
+                subject_id: "d1".to_owned(),
+                operator: "operator@example".to_owned(),
+                evidence: "".to_owned(),
+            })
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
     }
 }

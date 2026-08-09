@@ -13,6 +13,7 @@ pub enum ErrorCode {
     UnknownApplication,
     UnknownEnvironment,
     UnknownDeployment,
+    UnknownRecoveryIncident,
     InvalidVersion,
     InvalidArtifact,
     ArtifactNotFound,
@@ -24,6 +25,7 @@ pub enum ErrorCode {
     VerificationFailed,
     RollbackUnavailable,
     RollbackFailed,
+    RecoveryIncidentConflict,
     InvalidStateTransition,
     PersistenceFailed,
 }
@@ -36,6 +38,7 @@ impl ErrorCode {
             Self::UnknownApplication => "unknown_application",
             Self::UnknownEnvironment => "unknown_environment",
             Self::UnknownDeployment => "unknown_deployment",
+            Self::UnknownRecoveryIncident => "unknown_recovery_incident",
             Self::InvalidVersion => "invalid_version",
             Self::InvalidArtifact => "invalid_artifact",
             Self::ArtifactNotFound => "artifact_not_found",
@@ -47,6 +50,7 @@ impl ErrorCode {
             Self::VerificationFailed => "verification_failed",
             Self::RollbackUnavailable => "rollback_unavailable",
             Self::RollbackFailed => "rollback_failed",
+            Self::RecoveryIncidentConflict => "recovery_incident_conflict",
             Self::InvalidStateTransition => "invalid_state_transition",
             Self::PersistenceFailed => "persistence_failed",
         }
@@ -91,6 +95,10 @@ mod tests {
             (ErrorCode::UnknownApplication, "unknown_application"),
             (ErrorCode::UnknownEnvironment, "unknown_environment"),
             (ErrorCode::UnknownDeployment, "unknown_deployment"),
+            (
+                ErrorCode::UnknownRecoveryIncident,
+                "unknown_recovery_incident",
+            ),
             (ErrorCode::InvalidVersion, "invalid_version"),
             (ErrorCode::InvalidArtifact, "invalid_artifact"),
             (ErrorCode::ArtifactNotFound, "artifact_not_found"),
@@ -105,6 +113,10 @@ mod tests {
             (ErrorCode::VerificationFailed, "verification_failed"),
             (ErrorCode::RollbackUnavailable, "rollback_unavailable"),
             (ErrorCode::RollbackFailed, "rollback_failed"),
+            (
+                ErrorCode::RecoveryIncidentConflict,
+                "recovery_incident_conflict",
+            ),
             (
                 ErrorCode::InvalidStateTransition,
                 "invalid_state_transition",

@@ -1,23 +1,27 @@
-//! SQLite adapter for startup recovery.
+//! SQLite adapter for startup recovery and operator acknowledgement.
 //!
 //! Recovery is intentionally persisted separately from normal deployment and
 //! rollback workflow repositories. The adapter atomically terminates stale
-//! orchestration records and records whether the environment is safe to reuse.
+//! orchestration records, records whether the environment is safe to reuse, and
+//! only releases a manual recovery guard after an exact operator acknowledgement.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::domain::{
     ApplicationId, Artifact, Deployment, DeploymentId, DeploymentState, EnvironmentId,
-    RecoveryDisposition, RecoveryIncident, RecoverySubjectKind, RollbackOperation,
-    RollbackOperationId, RollbackOperationState,
+    RecoveryAcknowledgement, RecoveryAcknowledgementRecord, RecoveryDisposition,
+    RecoveryIncident, RecoverySubjectKind, RollbackOperation, RollbackOperationId,
+    RollbackOperationState,
 };
 use crate::ports::{RecoveryRepository, RepositoryError, RepositoryResult};
 
 const INITIAL_MIGRATION: &str = include_str!("../migrations/001_initial.sql");
 const RECOVERY_MIGRATION: &str = include_str!("../migrations/002_startup_recovery.sql");
+const ACKNOWLEDGEMENT_MIGRATION: &str =
+    include_str!("../migrations/003_operator_reconciliation.sql");
 
 type DeploymentRow = (String, String, String, String, i64, String, String);
 type RollbackRow = (String, String, String, String);
@@ -32,6 +36,16 @@ type IncidentRow = (
     String,
     i64,
     Option<i64>,
+);
+type AcknowledgementRow = (
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
 );
 
 pub struct SqliteRecoveryRepository {
@@ -53,6 +67,9 @@ impl SqliteRecoveryRepository {
             .map_err(storage_error)?;
         connection
             .execute_batch(RECOVERY_MIGRATION)
+            .map_err(storage_error)?;
+        connection
+            .execute_batch(ACKNOWLEDGEMENT_MIGRATION)
             .map_err(storage_error)?;
         Ok(Self { connection })
     }
@@ -210,6 +227,149 @@ impl RecoveryRepository for SqliteRecoveryRepository {
         rows.map(|row| row.map_err(storage_error).and_then(decode_incident))
             .collect()
     }
+
+    fn get_incident(&self, incident_id: u64) -> RepositoryResult<Option<RecoveryIncident>> {
+        let incident_id = sqlite_id(incident_id)?;
+        self.connection
+            .query_row(
+                "SELECT id, subject_kind, subject_id, application_id, environment_id,
+                        previous_state, disposition, reason, created_at_unix_ms,
+                        resolved_at_unix_ms
+                 FROM recovery_incidents
+                 WHERE id = ?1",
+                params![incident_id],
+                incident_row,
+            )
+            .optional()
+            .map_err(storage_error)?
+            .map(decode_incident)
+            .transpose()
+    }
+
+    fn acknowledge_incident(
+        &mut self,
+        acknowledgement: &RecoveryAcknowledgement,
+    ) -> RepositoryResult<RecoveryAcknowledgementRecord> {
+        let incident_id = sqlite_id(acknowledgement.incident_id())?;
+        let now = now_unix_ms();
+        let transaction = self.connection.transaction().map_err(storage_error)?;
+        let incident = incident_by_id(&transaction, incident_id)?.ok_or(
+            RepositoryError::RecoveryIncidentNotFound(acknowledgement.incident_id()),
+        )?;
+
+        validate_acknowledgement(&incident, acknowledgement)?;
+
+        transaction
+            .execute(
+                "INSERT INTO recovery_acknowledgements (
+                    incident_id, application_id, environment_id, subject_kind,
+                    subject_id, operator, evidence, acknowledged_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    incident_id,
+                    acknowledgement.application(),
+                    acknowledgement.environment(),
+                    subject_kind_name(acknowledgement.subject_kind()),
+                    acknowledgement.subject_id(),
+                    acknowledgement.operator(),
+                    acknowledgement.evidence(),
+                    now,
+                ],
+            )
+            .map_err(storage_error)?;
+
+        let updated = transaction
+            .execute(
+                "UPDATE recovery_incidents
+                 SET resolved_at_unix_ms = ?1
+                 WHERE id = ?2
+                   AND resolved_at_unix_ms IS NULL
+                   AND disposition = 'manual_reconciliation_required'",
+                params![now, incident_id],
+            )
+            .map_err(storage_error)?;
+        if updated != 1 {
+            return Err(RepositoryError::RecoveryIncidentConflict(format!(
+                "recovery incident {} changed while it was being acknowledged",
+                acknowledgement.incident_id()
+            )));
+        }
+
+        transaction.commit().map_err(storage_error)?;
+        Ok(RecoveryAcknowledgementRecord::rehydrate(
+            acknowledgement.clone(),
+            now,
+        ))
+    }
+
+    fn acknowledgement(
+        &self,
+        incident_id: u64,
+    ) -> RepositoryResult<Option<RecoveryAcknowledgementRecord>> {
+        let incident_id = sqlite_id(incident_id)?;
+        self.connection
+            .query_row(
+                "SELECT incident_id, application_id, environment_id, subject_kind,
+                        subject_id, operator, evidence, acknowledged_at_unix_ms
+                 FROM recovery_acknowledgements
+                 WHERE incident_id = ?1",
+                params![incident_id],
+                acknowledgement_row,
+            )
+            .optional()
+            .map_err(storage_error)?
+            .map(decode_acknowledgement)
+            .transpose()
+    }
+}
+
+fn validate_acknowledgement(
+    incident: &RecoveryIncident,
+    acknowledgement: &RecoveryAcknowledgement,
+) -> RepositoryResult<()> {
+    if incident.disposition() != RecoveryDisposition::ManualReconciliationRequired {
+        return Err(RepositoryError::RecoveryIncidentConflict(format!(
+            "recovery incident {} is not a manual reconciliation incident",
+            incident.id()
+        )));
+    }
+    if incident.resolved_at_unix_ms().is_some() {
+        return Err(RepositoryError::RecoveryIncidentConflict(format!(
+            "recovery incident {} is already resolved",
+            incident.id()
+        )));
+    }
+    if incident.application() != acknowledgement.application()
+        || incident.environment() != acknowledgement.environment()
+        || incident.subject_kind() != acknowledgement.subject_kind()
+        || incident.subject_id() != acknowledgement.subject_id()
+    {
+        return Err(RepositoryError::RecoveryIncidentConflict(format!(
+            "recovery incident {} identity does not match acknowledgement",
+            incident.id()
+        )));
+    }
+    Ok(())
+}
+
+fn incident_by_id(
+    transaction: &Transaction<'_>,
+    incident_id: i64,
+) -> RepositoryResult<Option<RecoveryIncident>> {
+    transaction
+        .query_row(
+            "SELECT id, subject_kind, subject_id, application_id, environment_id,
+                    previous_state, disposition, reason, created_at_unix_ms,
+                    resolved_at_unix_ms
+             FROM recovery_incidents
+             WHERE id = ?1",
+            params![incident_id],
+            incident_row,
+        )
+        .optional()
+        .map_err(storage_error)?
+        .map(decode_incident)
+        .transpose()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -349,6 +509,50 @@ fn decode_incident(row: IncidentRow) -> RepositoryResult<RecoveryIncident> {
     ))
 }
 
+fn acknowledgement_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AcknowledgementRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+    ))
+}
+
+fn decode_acknowledgement(
+    row: AcknowledgementRow,
+) -> RepositoryResult<RecoveryAcknowledgementRecord> {
+    let (
+        incident_id,
+        application,
+        environment,
+        subject_kind,
+        subject_id,
+        operator,
+        evidence,
+        acknowledged_at_unix_ms,
+    ) = row;
+    let incident_id = u64::try_from(incident_id)
+        .map_err(|_| RepositoryError::CorruptData("negative recovery incident id".into()))?;
+    let acknowledgement = RecoveryAcknowledgement::new(
+        incident_id,
+        application,
+        environment,
+        parse_subject_kind(&subject_kind)?,
+        subject_id,
+        operator,
+        evidence,
+    )
+    .map_err(corrupt_recovery)?;
+    Ok(RecoveryAcknowledgementRecord::rehydrate(
+        acknowledgement,
+        acknowledged_at_unix_ms,
+    ))
+}
+
 fn state_name(state: DeploymentState) -> &'static str {
     match state {
         DeploymentState::Created => "created",
@@ -420,6 +624,11 @@ fn parse_disposition(value: &str) -> RepositoryResult<RecoveryDisposition> {
     }
 }
 
+fn sqlite_id(value: u64) -> RepositoryResult<i64> {
+    i64::try_from(value)
+        .map_err(|_| RepositoryError::Storage("recovery incident id exceeds SQLite INTEGER".into()))
+}
+
 fn storage_error(error: rusqlite::Error) -> RepositoryError {
     RepositoryError::Storage(error.to_string())
 }
@@ -429,6 +638,10 @@ fn corrupt_domain(error: crate::domain::DeploymentError) -> RepositoryError {
 }
 
 fn corrupt_rollback(error: crate::domain::RollbackError) -> RepositoryError {
+    RepositoryError::CorruptData(error.to_string())
+}
+
+fn corrupt_recovery(error: crate::domain::RecoveryError) -> RepositoryError {
     RepositoryError::CorruptData(error.to_string())
 }
 
