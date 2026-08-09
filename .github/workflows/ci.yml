@@ -5,7 +5,7 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   rust:
@@ -15,17 +15,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Commit generated Cargo.lock when missing
-        if: github.event_name == 'push' && github.ref == 'refs/heads/docs/v0.1-design'
-        run: |
-          if [ ! -f Cargo.lock ]; then
-            cargo generate-lockfile
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add -- Cargo.lock
-            git commit -m "build: lock Rust dependencies"
-            git push origin HEAD:docs/v0.1-design
-          fi
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test --all-features
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --all-features
