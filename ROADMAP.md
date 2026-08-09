@@ -150,7 +150,9 @@ Additional invariants:
 - [x] `deploy_application`
 - [x] `get_deployment`
 - [x] `list_deployments`
-- [ ] `rollback_deployment` — requires a durable deployment-bound rollback reference and a separate rollback application use case
+- [x] `rollback_deployment`
+- [x] durable deployment-bound `RollbackReference`
+- [x] independent durable `RollbackOperation`
 - [x] structured machine-readable errors
 - [x] no raw shell / remote deployment path / credential parameters
 
@@ -158,23 +160,30 @@ Acceptance criteria:
 
 - MCP remains a thin protocol adapter over the application-owned `DeploymentApi` inbound port;
 - deployment semantics remain in application/domain services rather than tool handlers;
-- tools return deployment records/results, state transitions, and step attempts rather than raw SSH command output;
+- tools return deployment/rollback records and structured outcomes rather than raw SSH command output;
 - `deploy_application` accepts only application/environment/version/local artifact path and rejects undeclared fields such as shell commands or SSH credentials;
+- `rollback_deployment` accepts only `deployment_id`; callers cannot supply backup/install paths, task names, credentials, or shell fragments;
+- a successful deployment records a rollback reference bound to that deployment when the configured rollback capability is available; reference-persistence failure is reported separately and does not rewrite an already successful deployment as failed;
+- explicit rollback is a separate `RollbackOperation`; it never reopens the terminal source `Deployment` aggregate;
+- the rollback reference snapshots target, backup/install paths, and rollback/restart/health task names and is used only when the current environment contract still matches that snapshot;
+- a newer deployment record for the same application/environment conservatively invalidates the older reference before remote mutation;
+- successful explicit rollback atomically marks the rollback operation `SUCCEEDED` and consumes the reference; failed explicit rollback records `FAILED` while preserving the active reference for a retry;
+- process-local leases serialize deploy/rollback calls in one process, while SQLite constraints/triggers prevent a started explicit rollback and a non-terminal deployment from mutating the same application/environment across separate process/repository instances;
 - `get_deployment` and `list_deployments` query durable state through `DeploymentRepository`, not SQLite from the MCP adapter;
 - `list_deployments` is bounded to 1..=200 records and requires an application when filtering by environment;
 - stdout is reserved for MCP stdio frames; startup diagnostics/logging go to stderr;
 - the server composes the existing remote-exec MCP client rather than adding SSH/SFTP code;
-- explicit rollback is not exposed until the selected deployment can be proven to own a still-valid backup reference. A fixed environment `backup_path` alone is insufficient because later deployments may overwrite it.
+- dedicated explicit-rollback tests prove success/consume, failure/retry, newer-deployment invalidation, cross-instance mutation exclusion, and configuration-drift rejection before remote work.
 
 ## Phase 7 — Production hardening for v0.1
 
 - [ ] idempotency key support
 - [ ] reject same version with changed checksum
-- [ ] startup recovery policy for non-terminal deployments
+- [ ] startup recovery policy for non-terminal deployments and `STARTED` rollback operations
 - [ ] deployment-level structured audit/history
-- [ ] timeouts at deployment-step level
+- [ ] timeouts at deployment-step and explicit-rollback-operation level
 - [ ] deterministic verification retry policy
-- [ ] explicit rollback-unavailable behavior
+- [ ] rollback-reference retention/cleanup policy
 - [ ] local artifact-path allowlist
 - [ ] threat-model regression tests
 - [ ] disposable integration test using a real remote-exec-mcp process or equivalent protocol fixture
@@ -182,7 +191,7 @@ Acceptance criteria:
 
 ## v0.1 completion boundary
 
-v0.1 is complete when a Java JAR can be deployed to one configured Linux/systemd environment through `remote-exec-mcp`, with durable state, deterministic verification, automatic rollback, deployment history, and no unrestricted remote execution surface in deploy-mcp.
+v0.1 is complete when a Java JAR can be deployed to one configured Linux/systemd environment through `remote-exec-mcp`, with durable state, deterministic verification, automatic rollback, safe deployment-bound explicit rollback, deployment history, and no unrestricted remote execution surface in deploy-mcp.
 
 ## Post-v0.1 candidates
 
