@@ -6,11 +6,12 @@ use deploy_mcp::application::{DeploymentApi, DeploymentApplication};
 use deploy_mcp::config::Config;
 use deploy_mcp::mcp::DeployMcp;
 use deploy_mcp::persistence::SqliteDeploymentRepository;
+use deploy_mcp::ports::RollbackRepository;
+use deploy_mcp::rollback_persistence::SqliteRollbackRepository;
 use rmcp::{transport::stdio, ServiceExt};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // stdout is reserved for MCP JSON-RPC frames when using stdio.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_target(false)
@@ -25,6 +26,13 @@ async fn main() -> Result<()> {
         SqliteDeploymentRepository::open(&database_path)
             .with_context(|| format!("failed to open deployment database at {database_path}"))?,
     ));
+    let rollback_repository: Arc<Mutex<Box<dyn RollbackRepository + Send>>> = Arc::new(Mutex::new(
+        Box::new(
+            SqliteRollbackRepository::open(&database_path).with_context(|| {
+                format!("failed to open rollback database at {database_path}")
+            })?,
+        ),
+    ));
     let remote = Arc::new(
         RemoteExecMcpAdapter::spawn_from_config(&config.remote_exec)
             .await
@@ -34,6 +42,7 @@ async fn main() -> Result<()> {
         Arc::clone(&config),
         remote,
         repository,
+        rollback_repository,
     ));
 
     let service = DeployMcp::new(application).serve(stdio()).await?;

@@ -9,7 +9,10 @@ use async_trait::async_trait;
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::domain::{Deployment, DeploymentId, DeploymentState, DeploymentStep};
+use crate::domain::{
+    Deployment, DeploymentId, DeploymentState, DeploymentStep, RollbackOperation,
+    RollbackOperationId, RollbackOperationState, RollbackReference,
+};
 
 pub type RemoteExecutionResult<T> = Result<T, RemoteExecutionError>;
 pub type RepositoryResult<T> = Result<T, RepositoryError>;
@@ -39,9 +42,7 @@ pub struct RemoteTaskResult {
 #[async_trait]
 pub trait RemoteExecutionPort: Send + Sync {
     async fn check_target(&self, target: &str) -> RemoteExecutionResult<RemoteTargetCheck>;
-
     async fn list_tasks(&self, target: &str) -> RemoteExecutionResult<BTreeSet<String>>;
-
     async fn upload_file(
         &self,
         target: &str,
@@ -49,7 +50,6 @@ pub trait RemoteExecutionPort: Send + Sync {
         remote_path: &str,
         overwrite: bool,
     ) -> RemoteExecutionResult<RemoteTransferResult>;
-
     async fn run_task(
         &self,
         target: &str,
@@ -70,23 +70,13 @@ pub enum RemoteExecutionError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StepAttemptId(u64);
-
 impl StepAttemptId {
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    pub const fn get(self) -> u64 {
-        self.0
-    }
+    pub const fn new(value: u64) -> Self { Self(value) }
+    pub const fn get(self) -> u64 { self.0 }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StepAttemptStatus {
-    Started,
-    Succeeded,
-    Failed,
-}
+pub enum StepAttemptStatus { Started, Succeeded, Failed }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeploymentTransition {
@@ -107,45 +97,43 @@ pub struct StepAttemptRecord {
 
 pub trait DeploymentRepository {
     fn create(&mut self, deployment: &Deployment) -> RepositoryResult<()>;
-
     fn get(&self, id: &DeploymentId) -> RepositoryResult<Option<Deployment>>;
-
     fn list(
         &self,
         application: Option<&str>,
         environment: Option<&str>,
         limit: usize,
     ) -> RepositoryResult<Vec<Deployment>>;
-
     fn list_non_terminal(&self) -> RepositoryResult<Vec<Deployment>>;
-
-    /// Atomically move the durable state and append the matching history row.
-    ///
-    /// `expected_from` provides optimistic concurrency protection. If durable
-    /// state differs, no state or history mutation is committed.
     fn persist_transition(
         &mut self,
         id: &DeploymentId,
         expected_from: DeploymentState,
         to: DeploymentState,
     ) -> RepositoryResult<()>;
-
     fn transitions(&self, id: &DeploymentId) -> RepositoryResult<Vec<DeploymentTransition>>;
-
-    fn start_step(
-        &mut self,
-        id: &DeploymentId,
-        step: DeploymentStep,
-    ) -> RepositoryResult<StepAttemptId>;
-
+    fn start_step(&mut self, id: &DeploymentId, step: DeploymentStep) -> RepositoryResult<StepAttemptId>;
     fn finish_step(
         &mut self,
         attempt_id: StepAttemptId,
         status: StepAttemptStatus,
         error: Option<&str>,
     ) -> RepositoryResult<()>;
-
     fn step_attempts(&self, id: &DeploymentId) -> RepositoryResult<Vec<StepAttemptRecord>>;
+}
+
+pub trait RollbackRepository: Send {
+    fn record_reference(&mut self, reference: &RollbackReference) -> RepositoryResult<()>;
+    fn get_reference(&self, deployment_id: &DeploymentId) -> RepositoryResult<Option<RollbackReference>>;
+    fn begin_operation(&mut self, operation: &RollbackOperation) -> RepositoryResult<RollbackReference>;
+    fn finish_operation(
+        &mut self,
+        operation_id: &RollbackOperationId,
+        source_deployment_id: &DeploymentId,
+        state: RollbackOperationState,
+        error: Option<&str>,
+    ) -> RepositoryResult<()>;
+    fn get_operation(&self, operation_id: &RollbackOperationId) -> RepositoryResult<Option<RollbackOperation>>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -157,10 +145,13 @@ pub enum RepositoryError {
     #[error("deployment not found: {0}")]
     NotFound(String),
     #[error("deployment state conflict for {deployment_id}: expected {expected:?}")]
-    StateConflict {
-        deployment_id: String,
-        expected: DeploymentState,
-    },
+    StateConflict { deployment_id: String, expected: DeploymentState },
+    #[error("rollback is unavailable: {0}")]
+    RollbackUnavailable(String),
+    #[error("another mutation is active for {application}/{environment}")]
+    MutationConflict { application: String, environment: String },
+    #[error("rollback operation state conflict: {0}")]
+    RollbackOperationConflict(String),
     #[error("corrupt repository data: {0}")]
     CorruptData(String),
     #[error("invalid step-attempt completion")]
