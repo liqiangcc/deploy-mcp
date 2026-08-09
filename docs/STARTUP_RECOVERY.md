@@ -89,7 +89,7 @@ It atomically:
 3. records the terminal transition;
 4. creates an unresolved `manual_reconciliation_required` recovery incident.
 
-The unresolved incident is a durable mutation guard. SQLite rejects new deployments and explicit rollbacks for the same `(application, environment)` until a future operator reconciliation workflow resolves the incident.
+The unresolved incident is a durable mutation guard. SQLite rejects new deployments and explicit rollbacks for the same `(application, environment)` until an operator inspects the actual environment and records a valid acknowledgement through the separate administrative recovery path.
 
 `FAILED` therefore means the old orchestration is no longer running; the unresolved `RecoveryIncident` separately means the environment is not yet proven safe for another mutation.
 
@@ -121,11 +121,32 @@ unresolved incident
 
 The database is the correctness boundary. In-memory locks cannot satisfy restart or multi-process recovery safety.
 
+Migration `003_operator_reconciliation.sql` adds the durable acknowledgement audit record. A valid operator acknowledgement inserts that audit record and resolves the incident in one SQLite transaction. Only the committed `resolved_at_unix_ms` removes the trigger condition.
+
+## Operator reconciliation
+
+Manual reconciliation is deliberately separate from startup recovery and from the normal MCP surface:
+
+```text
+operator inspection
+  -> deploy-mcp-recovery CLI
+  -> RecoveryAdminService
+  -> RecoveryRepository
+  -> exact incident validation
+  -> acknowledgement audit + incident resolution
+```
+
+The normal MCP server does not expose a tool that clears recovery incidents. `RecoveryAdminService` also has no `RemoteExecutionPort` dependency: acknowledgement never runs remote commands or infers remote state.
+
+An acknowledgement must provide the exact incident id, application, environment, subject kind, subject id, a non-empty operator value, and non-empty evidence. Any identity mismatch, replay, already-resolved incident, or non-manual incident remains fail-closed.
+
+See `docs/OPERATOR_RECONCILIATION.md` for the operator procedure and CLI contract.
+
 ## Idempotence
 
-Recovery updates use expected persisted states. Re-running startup recovery after a completed reconciliation does not create a duplicate incident or repeat a state transition.
+Startup recovery updates use expected persisted states. Re-running startup recovery after a completed reconciliation does not create a duplicate incident or repeat a state transition.
 
-An unresolved manual incident survives subsequent restarts and continues to block mutation.
+An unresolved manual incident survives subsequent restarts and continues to block mutation. Operator acknowledgement is single-use: once an incident is resolved, the same acknowledgement cannot be replayed.
 
 ## Current boundary
 
@@ -137,15 +158,19 @@ Implemented now:
 - preserve step/transition history;
 - persist resolved or unresolved recovery incidents;
 - fail closed across process restarts and SQLite connections;
-- perform no remote recovery work at startup.
+- perform no remote recovery work at startup;
+- list unresolved incidents through a separate administrative CLI;
+- require exact incident identity plus operator/evidence before acknowledgement;
+- atomically persist acknowledgement evidence and resolve the incident;
+- release the durable mutation guard only after that transaction commits.
 
-Not implemented yet:
+Not implemented by this recovery subsystem:
 
-- operator inspection/reconciliation workflow for an unresolved incident;
-- operator acknowledgement/resolution that removes the durable mutation guard;
-- automated remote-state inference or automatic post-crash rollback.
+- automated remote-state inference;
+- automatic post-crash rollback;
+- authentication/authorization for the operator identity string.
 
-The last item is intentionally not a v0.1 goal unless a future design can prove the remote state rather than infer it.
+Automated remote-state inference or automatic post-crash rollback is intentionally not a v0.1 goal unless a future design can prove the remote state rather than infer it. The `operator` acknowledgement field is audit metadata, not authentication; operating-system/database access controls must restrict use of the administrative binary.
 
 ## Safety evidence
 
@@ -155,3 +180,11 @@ The last item is intentionally not a v0.1 goal unless a future design can prove 
 - a post-mutation interruption becomes `FAILED` plus an unresolved incident, and a later deployment is blocked;
 - a second startup is idempotent and preserves the unresolved guard;
 - a `STARTED` explicit rollback becomes `FAILED`, its rollback reference remains active, and both rollback retry and new deployment remain blocked.
+
+`tests/recovery_acknowledgement.rs` additionally proves that:
+
+- the unresolved guard remains active before acknowledgement;
+- an exact acknowledgement persists its audit record and releases the guard;
+- the acknowledgement survives database reopen;
+- identity mismatch leaves the incident unresolved and mutation blocked;
+- acknowledgement replay is rejected.
