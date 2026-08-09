@@ -75,7 +75,10 @@ impl ProtocolFixture {
             return fixture_error("unknown_target", "fixture target is not configured");
         }
         if args.remote_path != "/opt/staging/demo.jar" || !args.overwrite {
-            return fixture_error("invalid_upload", "fixture upload contract was not respected");
+            return fixture_error(
+                "invalid_upload",
+                "fixture upload contract was not respected",
+            );
         }
         if matches!(self.mode, FixtureMode::MalformedUpload) {
             return CallToolResult::structured(json!({}));
