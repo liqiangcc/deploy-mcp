@@ -1,0 +1,129 @@
+use std::sync::{Arc, Mutex};
+
+use anyhow::{bail, Context, Result};
+use deploy_mcp::adapters::RemoteExecMcpAdapter;
+use deploy_mcp::application::{
+    DeploymentApi, DeploymentApplication, RollbackRetentionService, StartupRecoveryService,
+};
+use deploy_mcp::audit_persistence::SqliteAuditRepository;
+use deploy_mcp::config::Config;
+use deploy_mcp::domain::RecoveryDisposition;
+use deploy_mcp::mcp::DeployMcp;
+use deploy_mcp::persistence::SqliteDeploymentRepository;
+use deploy_mcp::ports::RollbackRepository;
+use deploy_mcp::recovery_persistence::SqliteRecoveryRepository;
+use deploy_mcp::rollback_persistence::SqliteRollbackRepository;
+use rmcp::{transport::stdio, ServiceExt};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_target(false)
+        .init();
+
+    let (config_path, database_path) = startup_paths()?;
+    let config = Arc::new(
+        Config::load(&config_path)
+            .with_context(|| format!("failed to load deploy-mcp config from {config_path}"))?,
+    );
+
+    let mut recovery = StartupRecoveryService::new(
+        SqliteRecoveryRepository::open(&database_path)
+            .with_context(|| format!("failed to open recovery database at {database_path}"))?,
+    );
+    let recovery_report = recovery
+        .recover()
+        .context("failed to recover interrupted deployment/rollback records")?;
+    for incident in recovery_report.incidents() {
+        match incident.disposition() {
+            RecoveryDisposition::AutoResolved => tracing::warn!(
+                subject_kind = ?incident.subject_kind(),
+                subject_id = incident.subject_id(),
+                application = incident.application(),
+                environment = incident.environment(),
+                previous_state = incident.previous_state(),
+                "startup recovery safely failed interrupted pre-mutation orchestration"
+            ),
+            RecoveryDisposition::ManualReconciliationRequired => tracing::error!(
+                subject_kind = ?incident.subject_kind(),
+                subject_id = incident.subject_id(),
+                application = incident.application(),
+                environment = incident.environment(),
+                previous_state = incident.previous_state(),
+                "startup recovery requires manual reconciliation; environment remains mutation-blocked"
+            ),
+        }
+    }
+
+    let repository = Arc::new(Mutex::new(
+        SqliteDeploymentRepository::open(&database_path)
+            .with_context(|| format!("failed to open deployment database at {database_path}"))?,
+    ));
+    let mut rollback_repository = SqliteRollbackRepository::open(&database_path)
+        .with_context(|| format!("failed to open rollback database at {database_path}"))?;
+    let cleanup_batch_size = usize::try_from(config.runtime.rollback_reference_cleanup_batch_size)
+        .context("rollback reference cleanup batch size does not fit usize")?;
+    let mut retention = RollbackRetentionService::new(
+        &mut rollback_repository,
+        config.runtime.rollback_reference_retention_days,
+        cleanup_batch_size,
+    );
+    let retention_report = retention
+        .cleanup()
+        .context("failed to apply rollback-reference retention policy")?;
+    if retention_report.pruned_references > 0 {
+        tracing::info!(
+            pruned_references = retention_report.pruned_references,
+            cutoff_unix_ms = retention_report.cutoff_unix_ms,
+            "pruned inactive rollback-reference capability snapshots"
+        );
+    }
+    let rollback_repository: Arc<Mutex<Box<dyn RollbackRepository + Send>>> =
+        Arc::new(Mutex::new(Box::new(rollback_repository)));
+    let audit_repository = Arc::new(
+        SqliteAuditRepository::open(&database_path)
+            .with_context(|| format!("failed to open audit history database at {database_path}"))?,
+    );
+    let remote = Arc::new(
+        RemoteExecMcpAdapter::spawn_from_config(&config.remote_exec)
+            .await
+            .context("failed to start remote-exec-mcp child process")?,
+    );
+    let application: Arc<dyn DeploymentApi> = Arc::new(
+        DeploymentApplication::new(Arc::clone(&config), remote, repository, rollback_repository)
+            .with_audit_repository(audit_repository),
+    );
+
+    let service = DeployMcp::new(application).serve(stdio()).await?;
+    service.waiting().await?;
+    Ok(())
+}
+
+fn startup_paths() -> Result<(String, String)> {
+    let mut config_path =
+        std::env::var("DEPLOY_MCP_CONFIG").unwrap_or_else(|_| "config/example.yaml".to_owned());
+    let mut database_path =
+        std::env::var("DEPLOY_MCP_DATABASE").unwrap_or_else(|_| "deployments.sqlite".to_owned());
+
+    let mut args = std::env::args().skip(1);
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--config" => {
+                config_path = args.next().context("--config requires a path argument")?;
+            }
+            "--database" => {
+                database_path = args.next().context("--database requires a path argument")?;
+            }
+            "--help" | "-h" => {
+                eprintln!(
+                    "Usage: deploy-mcp [--config PATH] [--database PATH]\nEnvironment: DEPLOY_MCP_CONFIG, DEPLOY_MCP_DATABASE"
+                );
+                std::process::exit(0);
+            }
+            other => bail!("unexpected argument: {other}; use --config PATH --database PATH"),
+        }
+    }
+
+    Ok((config_path, database_path))
+}

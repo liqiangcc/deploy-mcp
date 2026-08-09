@@ -1,0 +1,35 @@
+remote_exec:
+  command: remote-exec-mcp
+  args:
+    - --config
+    - /etc/remote-exec/config.yaml
+
+local_artifacts:
+  allowed_roots:
+    - /var/lib/deploy-mcp/artifacts
+
+runtime:
+  deployment_step_timeout_ms: 120000
+  explicit_rollback_timeout_ms: 300000
+  verification_max_attempts: 3
+  verification_retry_delay_ms: 1000
+  rollback_reference_retention_days: 30
+  rollback_reference_cleanup_batch_size: 500
+
+applications:
+  demo-service:
+    display_name: Demo Service
+    artifact_type: jar
+    environments:
+      test:
+        target: test-server
+        staging_path: /opt/staging/demo-service.jar
+        install_path: /opt/apps/demo-service/demo-service.jar
+        backup_path: /opt/apps/demo-service/backup/demo-service.jar
+        tasks:
+          precheck: demo-precheck
+          backup: demo-backup
+          install: demo-install
+          restart: demo-restart
+          health_check: demo-health
+          rollback: demo-rollback
