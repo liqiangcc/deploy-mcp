@@ -14,8 +14,8 @@ use crate::domain::{
 };
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::ports::{
-    DeploymentRepository, RemoteExecutionError, RemoteExecutionPort, RemoteTaskResult,
-    RepositoryError, RepositoryResult, StepAttemptId, StepAttemptStatus,
+    DeploymentRepository, DeploymentReservation, RemoteExecutionError, RemoteExecutionPort,
+    RemoteTaskResult, RepositoryError, RepositoryResult, StepAttemptId, StepAttemptStatus,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +24,7 @@ pub struct DeployRequest {
     pub environment: String,
     pub version: String,
     pub artifact_path: String,
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +81,7 @@ pub struct DeploymentOutcome {
     pub deployment: Deployment,
     pub failure: Option<DeploymentFailure>,
     pub rollback_failure: Option<DeploymentFailure>,
+    pub idempotent_replay: bool,
 }
 
 pub struct DeployService<R, D>
@@ -119,6 +121,7 @@ where
                 "version must not be empty",
             ));
         }
+        validate_idempotency_key(request.idempotency_key.as_deref())?;
 
         let environment = self
             .config
@@ -152,7 +155,19 @@ where
             environment_id,
             artifact.clone(),
         );
-        self.repository(|repository| repository.create(&deployment))?;
+        match self.repository(|repository| {
+            repository.reserve(&deployment, request.idempotency_key.as_deref())
+        })? {
+            DeploymentReservation::Created => {}
+            DeploymentReservation::Reused(existing) => {
+                return Ok(DeploymentOutcome {
+                    deployment: existing,
+                    failure: None,
+                    rollback_failure: None,
+                    idempotent_replay: true,
+                });
+            }
+        }
 
         let plan = DeploymentPlan::jar_systemd(
             deployment_id,
@@ -287,6 +302,7 @@ where
             deployment,
             failure: None,
             rollback_failure: None,
+            idempotent_replay: false,
         })
     }
 
@@ -408,6 +424,7 @@ where
                 deployment,
                 failure: Some(failure),
                 rollback_failure: None,
+                idempotent_replay: false,
             });
         }
 
@@ -422,6 +439,7 @@ where
             deployment,
             failure: Some(failure),
             rollback_failure,
+            idempotent_replay: false,
         })
     }
 
@@ -534,6 +552,25 @@ where
         })?;
         operation(&mut *repository).map_err(repository_error)
     }
+}
+
+fn validate_idempotency_key(key: Option<&str>) -> AppResult<()> {
+    let Some(key) = key else {
+        return Ok(());
+    };
+    if key.is_empty() || key.len() > 128 {
+        return Err(AppError::new(
+            ErrorCode::InvalidRequest,
+            "idempotency_key must contain between 1 and 128 bytes",
+        ));
+    }
+    if key.trim() != key || key.chars().any(char::is_control) {
+        return Err(AppError::new(
+            ErrorCode::InvalidRequest,
+            "idempotency_key must not contain leading/trailing whitespace or control characters",
+        ));
+    }
+    Ok(())
 }
 
 async fn load_artifact(version: &str, path: &str) -> AppResult<Artifact> {
@@ -674,9 +711,27 @@ fn rollback_parameters(environment: &EnvironmentConfig) -> BTreeMap<String, Valu
 
 fn repository_error(error: RepositoryError) -> AppError {
     match error {
-        RepositoryError::AlreadyExists(_) => AppError::new(
-            ErrorCode::ConflictingDeployment,
-            "another active deployment already exists for this application/environment",
+        RepositoryError::AlreadyExists(_) | RepositoryError::MutationConflict { .. } => {
+            AppError::new(
+                ErrorCode::ConflictingDeployment,
+                "another active mutation already exists for this application/environment",
+            )
+        }
+        RepositoryError::IdempotencyConflict(key) => AppError::new(
+            ErrorCode::IdempotencyConflict,
+            format!("idempotency key is already bound to a different deployment intent: {key}"),
+        ),
+        RepositoryError::ArtifactVersionConflict {
+            application,
+            environment,
+            version,
+            existing_sha256,
+            requested_sha256,
+        } => AppError::new(
+            ErrorCode::ArtifactVersionConflict,
+            format!(
+                "version {version} for {application}/{environment} is already bound to checksum {existing_sha256}; requested checksum is {requested_sha256}"
+            ),
         ),
         other => AppError::new(ErrorCode::PersistenceFailed, other.to_string()),
     }
@@ -795,6 +850,7 @@ applications:
             environment: "test".to_owned(),
             version: "1.2.3".to_owned(),
             artifact_path: artifact_path.to_owned(),
+            idempotency_key: None,
         }
     }
 
@@ -818,6 +874,7 @@ applications:
 
         let outcome = service.deploy(request(&artifact_path)).await.unwrap();
         assert_eq!(outcome.deployment.state(), DeploymentState::Succeeded);
+        assert!(!outcome.idempotent_replay);
         assert!(outcome.failure.is_none());
         assert!(outcome.rollback_failure.is_none());
 
@@ -1003,5 +1060,25 @@ applications:
         let error = service.deploy(request("/missing.jar")).await.unwrap_err();
         assert_eq!(error.code, ErrorCode::ConflictingDeployment);
         assert!(fake.calls().is_empty());
+    }
+
+    #[test]
+    fn idempotency_key_validation_is_bounded_and_canonical() {
+        assert!(validate_idempotency_key(None).is_ok());
+        assert!(validate_idempotency_key(Some("request-123")).is_ok());
+        assert_eq!(
+            validate_idempotency_key(Some(" request-123")).unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            validate_idempotency_key(Some("")).unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            validate_idempotency_key(Some(&"x".repeat(129)))
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidRequest
+        );
     }
 }
