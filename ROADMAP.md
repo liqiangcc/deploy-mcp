@@ -186,7 +186,7 @@ Acceptance criteria:
 - [x] deterministic verification retry policy
 - [x] rollback-reference retention/cleanup policy
 - [x] local artifact-path allowlist
-- [ ] threat-model regression tests
+- [x] threat-model regression tests
 - [ ] disposable integration test using a real remote-exec-mcp process or equivalent protocol fixture
 - [ ] README/config/client setup documentation
 
@@ -236,6 +236,16 @@ Local artifact-path allowlist acceptance criteria:
 - the same canonical authorized path is used for SHA-256/size calculation and passed to `RemoteExecutionPort::upload_file`, avoiding divergent path interpretation between the local read and transfer request;
 - `remote-exec-mcp` continues to apply its own independent local transfer allowlist/bounds; deploy-mcp does not assume its local read authorization replaces remote-exec policy;
 - the MCP surface gains no new caller-controlled commands, credentials, task names, or remote deployment paths, and explicit rollback/recovery flows do not depend on the local artifact allowlist.
+
+Threat-model regression acceptance criteria:
+
+- AI-facing mutation and read DTOs reject undeclared target, remote path, task, shell, command, argv, and credential controls before they can reach application orchestration;
+- local artifact capability is fail-closed: missing capability, unsafe configured roots, outside-root artifacts, and symlink escapes are rejected before any `RemoteExecutionPort` call or deployment state is created;
+- successful deployment regression tests prove target, remote staging/install/backup paths, and named tasks are derived from configuration rather than caller-supplied fields;
+- unknown application/environment identifiers cannot be used as an alternate target-selection channel and cause no remote work;
+- rollback authority remains deployment-bound: the AI-facing rollback tool accepts only `deployment_id`, while target/path/task authority remains in durable rollback references and validated configuration;
+- crash/timeout/recovery, idempotency, cross-process mutation guards, structured history disclosure boundaries, and remote adapter protocol constraints remain covered by their dedicated regression suites;
+- `docs/THREAT_MODEL.md` records trust assumptions, attack surfaces, fail-closed ordering, residual risks, and the rule that any future capability expansion must add corresponding boundary regression coverage.
 
 Verification retry acceptance criteria:
 
