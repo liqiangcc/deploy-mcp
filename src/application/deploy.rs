@@ -698,9 +698,7 @@ fn deployment_timeout_failure(step: DeploymentStep, timeout_ms: u64) -> Deployme
     DeploymentFailure::new(
         step,
         ErrorCode::OperationTimedOut,
-        format!(
-            "deployment step {step:?} exceeded {timeout_ms} ms; remote completion is unknown"
-        ),
+        format!("deployment step {step:?} exceeded {timeout_ms} ms; remote completion is unknown"),
     )
 }
 
