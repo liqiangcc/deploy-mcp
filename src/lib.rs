@@ -5,6 +5,7 @@
 
 pub mod adapters;
 pub mod application;
+pub mod audit_persistence;
 pub mod config;
 pub mod domain;
 pub mod error;
