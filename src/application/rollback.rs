@@ -58,7 +58,13 @@ where
         rollbacks: Arc<Mutex<Box<dyn RollbackRepository + Send>>>,
         locks: DeploymentLockManager,
     ) -> Self {
-        Self { config, remote, deployments, rollbacks, locks }
+        Self {
+            config,
+            remote,
+            deployments,
+            rollbacks,
+            locks,
+        }
     }
 
     pub async fn rollback(&self, request: RollbackRequest) -> AppResult<RollbackOutcome> {
@@ -77,55 +83,77 @@ where
                 )
             })?;
 
-        if !matches!(deployment.state(), DeploymentState::Succeeded | DeploymentState::RollbackFailed) {
+        if !matches!(
+            deployment.state(),
+            DeploymentState::Succeeded | DeploymentState::RollbackFailed
+        ) {
             return Err(AppError::new(
                 ErrorCode::RollbackUnavailable,
                 format!(
                     "deployment {} in state {:?} is not eligible for explicit rollback",
-                    deployment.id().as_str(), deployment.state()
+                    deployment.id().as_str(),
+                    deployment.state()
                 ),
             ));
         }
 
         let environment = self
             .config
-            .environment(deployment.application().as_str(), deployment.environment().as_str())
-            .map_err(|_| AppError::new(
-                ErrorCode::RollbackUnavailable,
-                "deployment environment is no longer configured",
-            ))?;
+            .environment(
+                deployment.application().as_str(),
+                deployment.environment().as_str(),
+            )
+            .map_err(|_| {
+                AppError::new(
+                    ErrorCode::RollbackUnavailable,
+                    "deployment environment is no longer configured",
+                )
+            })?;
         let reference = self
             .rollback_repository(|repository| repository.get_reference(&deployment_id))?
-            .ok_or_else(|| AppError::new(
-                ErrorCode::RollbackUnavailable,
-                format!("no durable rollback reference exists for {}", deployment.id().as_str()),
-            ))?;
+            .ok_or_else(|| {
+                AppError::new(
+                    ErrorCode::RollbackUnavailable,
+                    format!(
+                        "no durable rollback reference exists for {}",
+                        deployment.id().as_str()
+                    ),
+                )
+            })?;
         ensure_environment_contract(environment, &reference)?;
 
         let _lease = self
             .locks
-            .try_acquire(deployment.application().as_str(), deployment.environment().as_str())
-            .ok_or_else(|| AppError::new(
-                ErrorCode::ConflictingDeployment,
-                format!(
-                    "mutation already active for {}/{}",
-                    deployment.application().as_str(), deployment.environment().as_str()
-                ),
-            ))?;
-
-        let operation_id = RollbackOperationId::new(Uuid::new_v4().to_string()).map_err(|error| {
-            AppError::new(
-                ErrorCode::InvalidStateTransition,
-                format!("failed to create rollback operation id: {error}"),
+            .try_acquire(
+                deployment.application().as_str(),
+                deployment.environment().as_str(),
             )
-        })?;
+            .ok_or_else(|| {
+                AppError::new(
+                    ErrorCode::ConflictingDeployment,
+                    format!(
+                        "mutation already active for {}/{}",
+                        deployment.application().as_str(),
+                        deployment.environment().as_str()
+                    ),
+                )
+            })?;
+
+        let operation_id =
+            RollbackOperationId::new(Uuid::new_v4().to_string()).map_err(|error| {
+                AppError::new(
+                    ErrorCode::InvalidStateTransition,
+                    format!("failed to create rollback operation id: {error}"),
+                )
+            })?;
         let operation = RollbackOperation::new(
             operation_id.clone(),
             deployment.id().clone(),
             deployment.application().clone(),
             deployment.environment().clone(),
         );
-        let reference = self.rollback_repository(|repository| repository.begin_operation(&operation))?;
+        let reference =
+            self.rollback_repository(|repository| repository.begin_operation(&operation))?;
 
         if let Some(failure) = self.preflight(&reference).await {
             return self.finish_failed(operation_id, deployment_id, failure);
@@ -135,8 +163,14 @@ where
                 &reference,
                 reference.rollback_task(),
                 BTreeMap::from([
-                    ("backup_path".to_owned(), Value::String(reference.backup_path().to_owned())),
-                    ("install_path".to_owned(), Value::String(reference.install_path().to_owned())),
+                    (
+                        "backup_path".to_owned(),
+                        Value::String(reference.backup_path().to_owned()),
+                    ),
+                    (
+                        "install_path".to_owned(),
+                        Value::String(reference.install_path().to_owned()),
+                    ),
                 ]),
                 "rollback restore task failed",
             )
@@ -145,7 +179,12 @@ where
             return self.finish_failed(operation_id, deployment_id, failure);
         }
         if let Some(failure) = self
-            .run_task(&reference, reference.restart_task(), BTreeMap::new(), "rollback restart task failed")
+            .run_task(
+                &reference,
+                reference.restart_task(),
+                BTreeMap::new(),
+                "rollback restart task failed",
+            )
             .await
         {
             return self.finish_failed(operation_id, deployment_id, failure);
@@ -171,30 +210,39 @@ where
             )
         })?;
         let operation = self.load_operation(&operation_id)?;
-        Ok(RollbackOutcome { operation, failure: None })
+        Ok(RollbackOutcome {
+            operation,
+            failure: None,
+        })
     }
 
     async fn preflight(&self, reference: &RollbackReference) -> Option<RollbackFailure> {
         match self.remote.check_target(reference.target()).await {
             Ok(target) if target.reachable => {}
-            Ok(_) => return Some(RollbackFailure::new(
-                ErrorCode::PrecheckFailed,
-                format!("rollback target is not reachable: {}", reference.target()),
-            )),
-            Err(error) => return Some(RollbackFailure::from_remote(
-                ErrorCode::PrecheckFailed,
-                "rollback target preflight failed",
-                error,
-            )),
+            Ok(_) => {
+                return Some(RollbackFailure::new(
+                    ErrorCode::PrecheckFailed,
+                    format!("rollback target is not reachable: {}", reference.target()),
+                ))
+            }
+            Err(error) => {
+                return Some(RollbackFailure::from_remote(
+                    ErrorCode::PrecheckFailed,
+                    "rollback target preflight failed",
+                    error,
+                ))
+            }
         }
 
         let tasks = match self.remote.list_tasks(reference.target()).await {
             Ok(tasks) => tasks,
-            Err(error) => return Some(RollbackFailure::from_remote(
-                ErrorCode::PrecheckFailed,
-                "rollback capability preflight failed",
-                error,
-            )),
+            Err(error) => {
+                return Some(RollbackFailure::from_remote(
+                    ErrorCode::PrecheckFailed,
+                    "rollback capability preflight failed",
+                    error,
+                ))
+            }
         };
         let required = BTreeSet::from([
             reference.rollback_task().to_owned(),
@@ -219,10 +267,18 @@ where
         parameters: BTreeMap<String, Value>,
         action: &str,
     ) -> Option<RollbackFailure> {
-        match self.remote.run_task(reference.target(), task, parameters).await {
+        match self
+            .remote
+            .run_task(reference.target(), task, parameters)
+            .await
+        {
             Ok(result) if result.success => None,
             Ok(result) => Some(task_failure(action, task, &result)),
-            Err(error) => Some(RollbackFailure::from_remote(ErrorCode::RollbackFailed, action, error)),
+            Err(error) => Some(RollbackFailure::from_remote(
+                ErrorCode::RollbackFailed,
+                action,
+                error,
+            )),
         }
     }
 
@@ -241,25 +297,32 @@ where
             )
         })?;
         let operation = self.load_operation(&operation_id)?;
-        Ok(RollbackOutcome { operation, failure: Some(failure) })
+        Ok(RollbackOutcome {
+            operation,
+            failure: Some(failure),
+        })
     }
 
     fn load_operation(&self, id: &RollbackOperationId) -> AppResult<RollbackOperation> {
         self.rollback_repository(|repository| repository.get_operation(id))?
-            .ok_or_else(|| AppError::new(
-                ErrorCode::PersistenceFailed,
-                format!("rollback operation disappeared: {}", id.as_str()),
-            ))
+            .ok_or_else(|| {
+                AppError::new(
+                    ErrorCode::PersistenceFailed,
+                    format!("rollback operation disappeared: {}", id.as_str()),
+                )
+            })
     }
 
     fn deployment_repository<T>(
         &self,
         operation: impl FnOnce(&D) -> RepositoryResult<T>,
     ) -> AppResult<T> {
-        let repository = self.deployments.lock().map_err(|_| AppError::new(
-            ErrorCode::PersistenceFailed,
-            "deployment repository lock poisoned",
-        ))?;
+        let repository = self.deployments.lock().map_err(|_| {
+            AppError::new(
+                ErrorCode::PersistenceFailed,
+                "deployment repository lock poisoned",
+            )
+        })?;
         operation(&*repository).map_err(repository_error)
     }
 
@@ -267,22 +330,31 @@ where
         &self,
         operation: impl FnOnce(&mut dyn RollbackRepository) -> RepositoryResult<T>,
     ) -> AppResult<T> {
-        let mut repository = self.rollbacks.lock().map_err(|_| AppError::new(
-            ErrorCode::PersistenceFailed,
-            "rollback repository lock poisoned",
-        ))?;
+        let mut repository = self.rollbacks.lock().map_err(|_| {
+            AppError::new(
+                ErrorCode::PersistenceFailed,
+                "rollback repository lock poisoned",
+            )
+        })?;
         operation(repository.as_mut()).map_err(repository_error)
     }
 }
 
 impl RollbackFailure {
     fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        Self { code, message: message.into(), remote_code: None }
+        Self {
+            code,
+            message: message.into(),
+            remote_code: None,
+        }
     }
 
     fn from_remote(code: ErrorCode, action: &str, error: RemoteExecutionError) -> Self {
         match error {
-            RemoteExecutionError::Remote { code: remote_code, message } => Self {
+            RemoteExecutionError::Remote {
+                code: remote_code,
+                message,
+            } => Self {
                 code,
                 message: format!("{action}: {message}"),
                 remote_code: Some(remote_code),
@@ -293,7 +365,10 @@ impl RollbackFailure {
 
     fn persisted_message(&self) -> String {
         match &self.remote_code {
-            Some(remote_code) => format!("{}: {} (remote_code={remote_code})", self.code, self.message),
+            Some(remote_code) => format!(
+                "{}: {} (remote_code={remote_code})",
+                self.code, self.message
+            ),
             None => format!("{}: {}", self.code, self.message),
         }
     }
@@ -309,7 +384,10 @@ fn task_failure(action: &str, task: &str, result: &RemoteTaskResult) -> Rollback
     };
     RollbackFailure::new(
         ErrorCode::RollbackFailed,
-        format!("{action}: task={task}, exit_code={:?}, detail={detail}", result.exit_code),
+        format!(
+            "{action}: task={task}, exit_code={:?}, detail={detail}",
+            result.exit_code
+        ),
     )
 }
 
@@ -317,10 +395,12 @@ fn ensure_environment_contract(
     environment: &EnvironmentConfig,
     reference: &RollbackReference,
 ) -> AppResult<()> {
-    let rollback_task = environment.tasks.rollback.as_deref().ok_or_else(|| AppError::new(
-        ErrorCode::RollbackUnavailable,
-        "rollback task is no longer configured",
-    ))?;
+    let rollback_task = environment.tasks.rollback.as_deref().ok_or_else(|| {
+        AppError::new(
+            ErrorCode::RollbackUnavailable,
+            "rollback task is no longer configured",
+        )
+    })?;
     let unchanged = environment.target == reference.target()
         && environment.backup_path == reference.backup_path()
         && environment.install_path == reference.install_path()
@@ -339,8 +419,13 @@ fn ensure_environment_contract(
 
 fn repository_error(error: RepositoryError) -> AppError {
     match error {
-        RepositoryError::RollbackUnavailable(message) => AppError::new(ErrorCode::RollbackUnavailable, message),
-        RepositoryError::MutationConflict { application, environment } => AppError::new(
+        RepositoryError::RollbackUnavailable(message) => {
+            AppError::new(ErrorCode::RollbackUnavailable, message)
+        }
+        RepositoryError::MutationConflict {
+            application,
+            environment,
+        } => AppError::new(
             ErrorCode::ConflictingDeployment,
             format!("mutation already active for {application}/{environment}"),
         ),

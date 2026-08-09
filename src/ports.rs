@@ -71,12 +71,20 @@ pub enum RemoteExecutionError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StepAttemptId(u64);
 impl StepAttemptId {
-    pub const fn new(value: u64) -> Self { Self(value) }
-    pub const fn get(self) -> u64 { self.0 }
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+    pub const fn get(self) -> u64 {
+        self.0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StepAttemptStatus { Started, Succeeded, Failed }
+pub enum StepAttemptStatus {
+    Started,
+    Succeeded,
+    Failed,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeploymentTransition {
@@ -112,7 +120,11 @@ pub trait DeploymentRepository {
         to: DeploymentState,
     ) -> RepositoryResult<()>;
     fn transitions(&self, id: &DeploymentId) -> RepositoryResult<Vec<DeploymentTransition>>;
-    fn start_step(&mut self, id: &DeploymentId, step: DeploymentStep) -> RepositoryResult<StepAttemptId>;
+    fn start_step(
+        &mut self,
+        id: &DeploymentId,
+        step: DeploymentStep,
+    ) -> RepositoryResult<StepAttemptId>;
     fn finish_step(
         &mut self,
         attempt_id: StepAttemptId,
@@ -124,8 +136,14 @@ pub trait DeploymentRepository {
 
 pub trait RollbackRepository: Send {
     fn record_reference(&mut self, reference: &RollbackReference) -> RepositoryResult<()>;
-    fn get_reference(&self, deployment_id: &DeploymentId) -> RepositoryResult<Option<RollbackReference>>;
-    fn begin_operation(&mut self, operation: &RollbackOperation) -> RepositoryResult<RollbackReference>;
+    fn get_reference(
+        &self,
+        deployment_id: &DeploymentId,
+    ) -> RepositoryResult<Option<RollbackReference>>;
+    fn begin_operation(
+        &mut self,
+        operation: &RollbackOperation,
+    ) -> RepositoryResult<RollbackReference>;
     fn finish_operation(
         &mut self,
         operation_id: &RollbackOperationId,
@@ -133,7 +151,10 @@ pub trait RollbackRepository: Send {
         state: RollbackOperationState,
         error: Option<&str>,
     ) -> RepositoryResult<()>;
-    fn get_operation(&self, operation_id: &RollbackOperationId) -> RepositoryResult<Option<RollbackOperation>>;
+    fn get_operation(
+        &self,
+        operation_id: &RollbackOperationId,
+    ) -> RepositoryResult<Option<RollbackOperation>>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -145,11 +166,17 @@ pub enum RepositoryError {
     #[error("deployment not found: {0}")]
     NotFound(String),
     #[error("deployment state conflict for {deployment_id}: expected {expected:?}")]
-    StateConflict { deployment_id: String, expected: DeploymentState },
+    StateConflict {
+        deployment_id: String,
+        expected: DeploymentState,
+    },
     #[error("rollback is unavailable: {0}")]
     RollbackUnavailable(String),
     #[error("another mutation is active for {application}/{environment}")]
-    MutationConflict { application: String, environment: String },
+    MutationConflict {
+        application: String,
+        environment: String,
+    },
     #[error("rollback operation state conflict: {0}")]
     RollbackOperationConflict(String),
     #[error("corrupt repository data: {0}")]

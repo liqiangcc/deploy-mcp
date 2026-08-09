@@ -17,8 +17,16 @@ use crate::ports::{RepositoryError, RepositoryResult, RollbackRepository};
 const INITIAL_MIGRATION: &str = include_str!("../migrations/001_initial.sql");
 
 type ReferenceRow = (
-    String, String, String, String, String,
-    String, String, String, String, String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
 );
 type OperationRow = (String, String, String, String, String);
 
@@ -36,7 +44,9 @@ impl SqliteRollbackRepository {
     }
 
     fn from_connection(connection: Connection) -> RepositoryResult<Self> {
-        connection.execute_batch(INITIAL_MIGRATION).map_err(storage_error)?;
+        connection
+            .execute_batch(INITIAL_MIGRATION)
+            .map_err(storage_error)?;
         Ok(Self { connection })
     }
 }
@@ -174,9 +184,9 @@ impl RollbackRepository for SqliteRollbackRepository {
         }
 
         let (_, _, state, source_rowid) =
-            source_deployment(&transaction, operation.source_deployment_id())?.ok_or_else(|| {
-                RepositoryError::NotFound(operation.source_deployment_id().as_str().to_owned())
-            })?;
+            source_deployment(&transaction, operation.source_deployment_id())?.ok_or_else(
+                || RepositoryError::NotFound(operation.source_deployment_id().as_str().to_owned()),
+            )?;
         if !matches!(state.as_str(), "succeeded" | "rollback_failed") {
             return Err(RepositoryError::RollbackUnavailable(format!(
                 "source deployment {} is not eligible for explicit rollback",
@@ -336,27 +346,54 @@ fn ensure_source_is_latest(
 
 fn reference_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReferenceRow> {
     Ok((
-        row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?,
-        row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?,
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
     ))
 }
 
 fn decode_reference(row: ReferenceRow) -> RepositoryResult<RollbackReference> {
     let (
-        deployment_id, application, environment, target, backup_path,
-        install_path, rollback_task, restart_task, health_check_task, state,
+        deployment_id,
+        application,
+        environment,
+        target,
+        backup_path,
+        install_path,
+        rollback_task,
+        restart_task,
+        health_check_task,
+        state,
     ) = row;
     Ok(RollbackReference::rehydrate(
         DeploymentId::new(deployment_id).map_err(corrupt_domain)?,
         ApplicationId::new(application).map_err(corrupt_domain)?,
         EnvironmentId::new(environment).map_err(corrupt_domain)?,
-        target, backup_path, install_path, rollback_task, restart_task,
-        health_check_task, parse_reference_state(&state)?,
+        target,
+        backup_path,
+        install_path,
+        rollback_task,
+        restart_task,
+        health_check_task,
+        parse_reference_state(&state)?,
     ))
 }
 
 fn operation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRow> {
-    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+    ))
 }
 
 fn decode_operation(row: OperationRow) -> RepositoryResult<RollbackOperation> {
@@ -375,7 +412,9 @@ fn parse_reference_state(value: &str) -> RepositoryResult<RollbackReferenceState
         "active" => Ok(RollbackReferenceState::Active),
         "superseded" => Ok(RollbackReferenceState::Superseded),
         "consumed" => Ok(RollbackReferenceState::Consumed),
-        other => Err(RepositoryError::CorruptData(format!("unknown rollback reference state: {other}"))),
+        other => Err(RepositoryError::CorruptData(format!(
+            "unknown rollback reference state: {other}"
+        ))),
     }
 }
 
@@ -392,7 +431,9 @@ fn parse_operation_state(value: &str) -> RepositoryResult<RollbackOperationState
         "started" => Ok(RollbackOperationState::Started),
         "succeeded" => Ok(RollbackOperationState::Succeeded),
         "failed" => Ok(RollbackOperationState::Failed),
-        other => Err(RepositoryError::CorruptData(format!("unknown rollback operation state: {other}"))),
+        other => Err(RepositoryError::CorruptData(format!(
+            "unknown rollback operation state: {other}"
+        ))),
     }
 }
 
@@ -406,6 +447,9 @@ fn corrupt_rollback(error: crate::domain::RollbackError) -> RepositoryError {
     RepositoryError::CorruptData(error.to_string())
 }
 fn now_unix_ms() -> i64 {
-    let millis = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
     i64::try_from(millis).unwrap_or(i64::MAX)
 }

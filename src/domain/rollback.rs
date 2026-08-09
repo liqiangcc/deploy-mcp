@@ -101,16 +101,36 @@ impl RollbackReference {
         }
     }
 
-    pub fn deployment_id(&self) -> &DeploymentId { &self.deployment_id }
-    pub fn application(&self) -> &ApplicationId { &self.application }
-    pub fn environment(&self) -> &EnvironmentId { &self.environment }
-    pub fn target(&self) -> &str { &self.target }
-    pub fn backup_path(&self) -> &str { &self.backup_path }
-    pub fn install_path(&self) -> &str { &self.install_path }
-    pub fn rollback_task(&self) -> &str { &self.rollback_task }
-    pub fn restart_task(&self) -> &str { &self.restart_task }
-    pub fn health_check_task(&self) -> &str { &self.health_check_task }
-    pub fn state(&self) -> RollbackReferenceState { self.state }
+    pub fn deployment_id(&self) -> &DeploymentId {
+        &self.deployment_id
+    }
+    pub fn application(&self) -> &ApplicationId {
+        &self.application
+    }
+    pub fn environment(&self) -> &EnvironmentId {
+        &self.environment
+    }
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+    pub fn backup_path(&self) -> &str {
+        &self.backup_path
+    }
+    pub fn install_path(&self) -> &str {
+        &self.install_path
+    }
+    pub fn rollback_task(&self) -> &str {
+        &self.rollback_task
+    }
+    pub fn restart_task(&self) -> &str {
+        &self.restart_task
+    }
+    pub fn health_check_task(&self) -> &str {
+        &self.health_check_task
+    }
+    pub fn state(&self) -> RollbackReferenceState {
+        self.state
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,7 +157,13 @@ impl RollbackOperation {
         application: ApplicationId,
         environment: EnvironmentId,
     ) -> Self {
-        Self { id, source_deployment_id, application, environment, state: RollbackOperationState::Started }
+        Self {
+            id,
+            source_deployment_id,
+            application,
+            environment,
+            state: RollbackOperationState::Started,
+        }
     }
 
     pub(crate) fn rehydrate(
@@ -147,18 +173,38 @@ impl RollbackOperation {
         environment: EnvironmentId,
         state: RollbackOperationState,
     ) -> Self {
-        Self { id, source_deployment_id, application, environment, state }
+        Self {
+            id,
+            source_deployment_id,
+            application,
+            environment,
+            state,
+        }
     }
 
-    pub fn id(&self) -> &RollbackOperationId { &self.id }
-    pub fn source_deployment_id(&self) -> &DeploymentId { &self.source_deployment_id }
-    pub fn application(&self) -> &ApplicationId { &self.application }
-    pub fn environment(&self) -> &EnvironmentId { &self.environment }
-    pub fn state(&self) -> RollbackOperationState { self.state }
+    pub fn id(&self) -> &RollbackOperationId {
+        &self.id
+    }
+    pub fn source_deployment_id(&self) -> &DeploymentId {
+        &self.source_deployment_id
+    }
+    pub fn application(&self) -> &ApplicationId {
+        &self.application
+    }
+    pub fn environment(&self) -> &EnvironmentId {
+        &self.environment
+    }
+    pub fn state(&self) -> RollbackOperationState {
+        self.state
+    }
 }
 
 fn non_empty(kind: &'static str, value: String) -> Result<String, RollbackError> {
-    if value.trim().is_empty() { Err(RollbackError::EmptyCapability(kind)) } else { Ok(value) }
+    if value.trim().is_empty() {
+        Err(RollbackError::EmptyCapability(kind))
+    } else {
+        Ok(value)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -179,15 +225,23 @@ mod tests {
             DeploymentId::new("d1").unwrap(),
             ApplicationId::new("demo").unwrap(),
             EnvironmentId::new("test").unwrap(),
-            "server", "/backup/demo.jar", "/opt/demo.jar",
-            "demo-rollback", "demo-restart", "demo-health",
-        ).unwrap();
+            "server",
+            "/backup/demo.jar",
+            "/opt/demo.jar",
+            "demo-rollback",
+            "demo-restart",
+            "demo-health",
+        )
+        .unwrap();
         assert_eq!(result.state(), RollbackReferenceState::Active);
         assert_eq!(result.target(), "server");
     }
 
     #[test]
     fn empty_operation_id_is_rejected() {
-        assert_eq!(RollbackOperationId::new("").unwrap_err(), RollbackError::InvalidOperationId);
+        assert_eq!(
+            RollbackOperationId::new("").unwrap_err(),
+            RollbackError::InvalidOperationId
+        );
     }
 }

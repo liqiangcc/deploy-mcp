@@ -26,13 +26,11 @@ async fn main() -> Result<()> {
         SqliteDeploymentRepository::open(&database_path)
             .with_context(|| format!("failed to open deployment database at {database_path}"))?,
     ));
-    let rollback_repository: Arc<Mutex<Box<dyn RollbackRepository + Send>>> = Arc::new(Mutex::new(
-        Box::new(
-            SqliteRollbackRepository::open(&database_path).with_context(|| {
-                format!("failed to open rollback database at {database_path}")
-            })?,
-        ),
-    ));
+    let rollback_repository: Arc<Mutex<Box<dyn RollbackRepository + Send>>> =
+        Arc::new(Mutex::new(Box::new(
+            SqliteRollbackRepository::open(&database_path)
+                .with_context(|| format!("failed to open rollback database at {database_path}"))?,
+        )));
     let remote = Arc::new(
         RemoteExecMcpAdapter::spawn_from_config(&config.remote_exec)
             .await
