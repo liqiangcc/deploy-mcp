@@ -113,7 +113,7 @@ impl DeployMcp {
     }
 
     #[tool(
-        description = "Get a bounded structured audit timeline for one deployment. The read-only projection combines durable deployment transitions/step attempts, rollback lifecycle, and recovery/reconciliation facts without exposing remote paths, task names, credentials, or shell controls."
+        description = "Get a bounded structured audit timeline for one deployment. The read-only projection combines durable deployment transitions/step attempts, rollback lifecycle, and recovery/reconciliation facts without exposing remote paths, task names, credentials, raw remote output, or shell controls."
     )]
     async fn get_deployment_history(
         &self,
@@ -222,7 +222,7 @@ fn failure_json(failure: &DeploymentFailure) -> Value {
     json!({
         "step": failure.step,
         "code": failure.code.as_str(),
-        "message": failure.message,
+        "message": format!("deployment step {:?} failed with code {}", failure.step, failure.code.as_str()),
         "remote_code": failure.remote_code,
     })
 }
@@ -245,9 +245,44 @@ fn audit_event_json(event: &AuditEvent) -> Value {
             "id": event.subject_id,
         },
         "event": event.kind.as_str(),
-        "attributes": event.attributes,
+        "attributes": public_audit_attributes(&event.attributes),
         "occurred_at_unix_ms": event.occurred_at_unix_ms,
     })
+}
+
+fn public_audit_attributes(attributes: &Value) -> Value {
+    let mut public = attributes.clone();
+    redact_sensitive_diagnostics(&mut public);
+    public
+}
+
+fn redact_sensitive_diagnostics(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            for key in [
+                "error",
+                "detail",
+                "stdout",
+                "stderr",
+                "evidence",
+                "shell",
+                "command",
+                "argv",
+                "credentials",
+            ] {
+                object.remove(key);
+            }
+            for nested in object.values_mut() {
+                redact_sensitive_diagnostics(nested);
+            }
+        }
+        Value::Array(values) => {
+            for nested in values {
+                redact_sensitive_diagnostics(nested);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn transition_json(transition: &DeploymentTransition) -> Value {
@@ -267,7 +302,7 @@ fn step_attempt_json(attempt: &StepAttemptRecord) -> Value {
             StepAttemptStatus::Succeeded => "succeeded",
             StepAttemptStatus::Failed => "failed",
         },
-        "error": attempt.error,
+        "error": attempt.error.as_ref().map(|_| "details_redacted"),
         "started_at_unix_ms": attempt.started_at_unix_ms,
         "finished_at_unix_ms": attempt.finished_at_unix_ms,
     })
@@ -293,7 +328,7 @@ fn rollback_operation_json(operation: &RollbackOperation) -> Value {
 fn rollback_failure_json(failure: &RollbackFailure) -> Value {
     json!({
         "code": failure.code.as_str(),
-        "message": failure.message,
+        "message": format!("rollback failed with code {}", failure.code.as_str()),
         "remote_code": failure.remote_code,
     })
 }
@@ -307,7 +342,9 @@ fn tool_error(error: AppError) -> CallToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::DeploymentStep;
     use crate::error::{AppResult, ErrorCode};
+    use crate::ports::StepAttemptId;
     use async_trait::async_trait;
 
     struct FakeApi;
@@ -421,5 +458,53 @@ mod tests {
         }))
         .unwrap_err();
         assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn ai_facing_serialization_redacts_remote_diagnostic_output() {
+        const SECRET: &str = "TOP_SECRET_TOKEN_FROM_REMOTE_STDERR";
+
+        let failure = DeploymentFailure {
+            step: DeploymentStep::Install,
+            code: ErrorCode::RemoteExecutionFailed,
+            message: format!("install failed: {SECRET}"),
+            remote_code: Some("task_failed".to_owned()),
+        };
+        let deployment_json = failure_json(&failure);
+        assert!(!deployment_json.to_string().contains(SECRET));
+        assert_eq!(deployment_json["code"], "remote_execution_failed");
+        assert_eq!(deployment_json["remote_code"], "task_failed");
+
+        let rollback = RollbackFailure {
+            code: ErrorCode::RollbackFailed,
+            message: format!("rollback failed: {SECRET}"),
+            remote_code: Some("task_failed".to_owned()),
+        };
+        let rollback_json = rollback_failure_json(&rollback);
+        assert!(!rollback_json.to_string().contains(SECRET));
+        assert_eq!(rollback_json["code"], "rollback_failed");
+
+        let attempt = StepAttemptRecord {
+            id: StepAttemptId::new(1),
+            step: DeploymentStep::Install,
+            status: StepAttemptStatus::Failed,
+            error: Some(format!("remote_execution_failed: {SECRET}")),
+            started_at_unix_ms: 1,
+            finished_at_unix_ms: Some(2),
+        };
+        let attempt_json = step_attempt_json(&attempt);
+        assert!(!attempt_json.to_string().contains(SECRET));
+        assert_eq!(attempt_json["error"], "details_redacted");
+
+        let attributes = public_audit_attributes(&json!({
+            "attempt_id": 1,
+            "error": SECRET,
+            "nested": {
+                "stderr": SECRET,
+                "safe": "kept"
+            }
+        }));
+        assert!(!attributes.to_string().contains(SECRET));
+        assert_eq!(attributes["nested"]["safe"], "kept");
     }
 }

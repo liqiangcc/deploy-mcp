@@ -6,7 +6,7 @@
 
 The central rule is:
 
-> AI controls deployment intent; deterministic code controls filesystem, persistence, rollback, and remote-execution capability boundaries.
+> AI controls deployment intent; deterministic code controls filesystem, persistence, rollback, remote-execution capability boundaries, and what diagnostic detail is disclosed back to AI callers.
 
 This document defines the v0.1 threat boundary and the regression tests that must remain green as the implementation evolves.
 
@@ -18,6 +18,7 @@ AI / MCP caller
   v
 MCP adapter
   | typed, deny-unknown-fields request DTOs
+  | structured/redacted diagnostic disclosure
   v
 Application / domain
   | configured app/env/task/path semantics
@@ -44,13 +45,14 @@ The v0.1 model treats these as untrusted:
 - caller-supplied `artifact_path` values;
 - replayed or duplicated deployment requests;
 - stale rollback requests;
-- remote failures, transport errors, and timeouts whose final remote state may be unknown.
+- remote failures, transport errors, remote stdout/stderr, and timeouts whose final remote state may be unknown.
 
 The v0.1 model assumes:
 
 - the OS account and administrators controlling deploy-mcp configuration and SQLite storage are trusted;
 - processes with write access to configured local artifact roots are trusted artifact producers;
 - `remote-exec-mcp` independently enforces its target, task, local-transfer, remote-path, authentication, and SSH/SFTP policies;
+- trusted SQLite storage may retain operator-useful free-form diagnostics, but that does not authorize the MCP layer to disclose them to AI callers;
 - compromise of deploy-mcp's host OS, SQLite file, or remote-exec-mcp itself is outside this application-layer threat model.
 
 ## Threats and controls
@@ -75,22 +77,26 @@ Regression coverage:
 
 ### 2. Local filesystem read escape
 
-Threat: a caller uses an absolute path, `..`, or a symlink to make deploy-mcp read a file outside the intended artifact directory.
+Threat: a caller uses an absolute path, `..`, an artifact symlink, or a symlinked allowed root to make deploy-mcp read a file outside the intended artifact directory.
 
 Controls:
 
 - `local_artifacts.allowed_roots` is an explicit capability list;
 - an omitted/empty list disables new local-artifact deployments;
-- roots must be bounded, absolute, non-filesystem-root paths without parent components;
+- configured root strings must be bounded, absolute, non-filesystem-root paths without parent components;
 - roots and requested artifacts are canonicalized;
+- every canonical root is revalidated as a directory and must still be a non-filesystem-root capability;
 - canonical artifact containment is checked before hashing, reservation, or remote work;
 - the same canonical path is used for hashing and upload delegation.
+
+The post-canonicalization root check prevents a lexical path such as `/srv/deploy/artifacts` from silently expanding into the entire filesystem when that path is a symbolic link to `/`.
 
 Regression coverage:
 
 - `tests/threat_model.rs::missing_local_artifact_capability_denies_before_remote_or_durable_work`
 - `tests/threat_model.rs::artifact_outside_allowlist_is_rejected_before_remote_or_durable_work`
 - `tests/threat_model.rs::symlink_inside_allowlist_cannot_escape_before_remote_or_durable_work`
+- `tests/threat_model.rs::symlinked_allowed_root_cannot_expand_capability_to_filesystem_root`
 - `tests/threat_model.rs::unsafe_artifact_capability_roots_are_rejected_at_configuration_boundary`
 - focused unit tests in `src/application/artifact_access.rs` and `src/config.rs`.
 
@@ -149,34 +155,44 @@ Regression coverage:
 
 ### 6. Ambiguous timeout or crash state
 
-Threat: a remote action may have completed even though deploy-mcp timed out or crashed, and immediately retrying or rolling back could duplicate or compound mutation.
+Threat: a remote action may have completed or may still be completing even though deploy-mcp timed out or crashed, and immediately retrying or rolling back could duplicate or compound mutation.
 
 Controls:
 
-- timeouts after the live mutation boundary preserve a non-terminal/unknown durable guard rather than claiming a terminal result;
+- the remote-side-effect ambiguity boundary starts at `STAGING_ARTIFACT`, not at `INSTALLING`;
+- staging upload and backup timeout preserve a non-terminal durable guard because fixed staging/backup resources may still be changing remotely;
+- install/restart/verify/rollback timeout likewise preserves a non-terminal/unknown guard rather than claiming a terminal result;
+- automatic rollback remains a separate policy boundary for **completed** failures after live artifact replacement starts;
 - started explicit rollback remains durably guarded when completion is unknown;
 - startup recovery never guesses remote state;
+- interrupted staging/backup/install/restart/verify/rollback states create manual-reconciliation incidents;
 - unresolved recovery incidents block later deployment/rollback mutation until explicit operator reconciliation.
 
 Regression coverage:
 
-- `tests/timeouts.rs`
+- `tests/timeouts.rs::staging_timeout_keeps_durable_guard_until_recovery`
+- `tests/timeouts.rs::backup_timeout_keeps_durable_guard_until_recovery`
+- remaining timeout cases in `tests/timeouts.rs`
 - `tests/startup_recovery.rs`
 - `tests/recovery_acknowledgement.rs`.
 
-### 7. Information disclosure through history tools
+### 7. Information disclosure through deployment/history tools
 
-Threat: read-only history becomes an indirect way to obtain credentials, shell controls, or executable rollback snapshot details.
+Threat: deployment results or read-only history become an indirect way to obtain credentials, shell controls, remote task stdout/stderr, secret-bearing error text, or executable rollback snapshot details.
 
 Controls:
 
 - audit history is projected from durable facts through `AuditRepository`;
-- normal AI-facing history exposes bounded structured lifecycle information;
+- trusted persistence may retain free-form diagnostics for operator forensics, but those strings are not the AI protocol contract;
+- deployment and rollback outcome serialization exposes stable structured fields (`step`, `code`, optional `remote_code`) plus generic public messages rather than raw remote output;
+- `get_deployment`/`list_deployments` retain step lifecycle but replace persisted free-form error bodies with `details_redacted`;
+- `get_deployment_history` recursively removes diagnostic/control keys including `error`, `detail`, `stdout`, `stderr`, `evidence`, `shell`, `command`, `argv`, and `credentials` before MCP serialization;
 - rollback target/path/task snapshot details and operator reconciliation evidence are excluded from the normal history projection;
 - history arguments reject remote execution parameters.
 
 Regression coverage:
 
+- `src/mcp.rs::ai_facing_serialization_redacts_remote_diagnostic_output`
 - `tests/structured_audit_history.rs`
 - history/list/get parameter rejection in `tests/threat_model.rs::ai_facing_read_schemas_do_not_accept_remote_execution_controls` and `src/mcp.rs`.
 
@@ -206,6 +222,8 @@ invalid MCP field
   -> reject during DTO decoding
 
 invalid/disabled local artifact capability
+  -> canonicalize configured root
+  -> revalidate canonical root is bounded
   -> reject before artifact hashing
   -> no deployment reservation
   -> no RemoteExecutionPort call
@@ -218,11 +236,15 @@ unknown application/environment
 
 missing remote target/task capability
   -> fail during PRECHECKING
-  -> no live artifact mutation
+  -> no side-effecting deployment step
 
-unknown post-mutation timeout/crash result
-  -> retain durable guard
+unknown side-effecting timeout/crash result
+  -> retain durable guard from STAGING_ARTIFACT onward
   -> require recovery/reconciliation rather than guessing
+
+free-form remote diagnostics
+  -> may remain in trusted operator storage
+  -> never cross the MCP disclosure boundary
 ```
 
 Tests should assert not only the error code but also the absence of remote calls and durable mutation where that is part of the boundary contract.
@@ -237,4 +259,4 @@ The application threat model also does not defend against a hostile kernel/host 
 
 `tests/threat_model.rs` is the focused cross-layer suite for the caller-to-capability boundary. It intentionally complements rather than duplicates transition, persistence, idempotency, rollback, timeout, recovery, reconciliation, retention, and remote-exec contract suites.
 
-Any new v0.1 or post-v0.1 capability that expands caller-controlled inputs, filesystem access, durable mutation, rollback authority, or remote execution must update this threat model and add a regression proving the new boundary fails closed.
+Any new v0.1 or post-v0.1 capability that expands caller-controlled inputs, filesystem access, durable mutation, rollback authority, diagnostic disclosure, or remote execution must update this threat model and add a regression proving the new boundary fails closed.

@@ -25,7 +25,7 @@ The recovery layer answers a different question from deployment state:
 - deployment/rollback state: **did the orchestration finish normally?**
 - recovery state: **is it safe to permit another mutation of this environment?**
 
-A crash after live mutation may leave the remote host in a state that cannot be inferred from local SQLite records. Startup recovery therefore never guesses remote state and never invokes `RemoteExecutionPort`.
+A crash after any remote side-effecting deployment step may leave the remote host in a state that cannot be inferred from local SQLite records. Startup recovery therefore never guesses remote state and never invokes `RemoteExecutionPort`.
 
 ## Startup ordering
 
@@ -45,20 +45,31 @@ If recovery persistence fails, startup fails closed before any remote child proc
 
 ## Interrupted deployment policy
 
-The existing deployment mutation boundary remains authoritative: `INSTALLING` is the first state in which the live artifact may have changed.
+Recovery uses a **remote-side-effect ambiguity boundary**, which is intentionally earlier than the automatic rollback boundary.
 
-### Before live mutation
+```text
+safe auto-resolution boundary
+  = CREATED / PRECHECKING
+
+remote-side-effect ambiguity boundary
+  = STAGING_ARTIFACT and later
+
+automatic rollback boundary for completed failures
+  = INSTALLING and later
+```
+
+The distinction matters because staging and backup do not replace the live artifact, but they still mutate shared remote resources. A timed-out or interrupted upload/backup can continue after deploy-mcp stops waiting and can race with a later deployment if the environment guard is released too early.
+
+### Before remote side effects
 
 For an interrupted deployment in:
 
 ```text
 CREATED
 PRECHECKING
-STAGING_ARTIFACT
-BACKING_UP
 ```
 
-startup recovery can prove that deploy-mcp had not intentionally crossed the live-artifact mutation boundary.
+startup recovery can prove that no deployment step intended to mutate remote deployment resources had started. Target/capability preflight is required to be non-mutating.
 
 It atomically:
 
@@ -69,18 +80,20 @@ It atomically:
 
 No unresolved environment guard remains, so a later deployment may proceed.
 
-### After live mutation may have started
+### After a remote side effect may have started
 
 For an interrupted deployment in:
 
 ```text
+STAGING_ARTIFACT
+BACKING_UP
 INSTALLING
 RESTARTING
 VERIFYING
 ROLLING_BACK
 ```
 
-startup recovery does **not** retry install, restart, verification, or rollback. The remote state is treated as unknown.
+startup recovery does **not** retry, cancel, clean up, install, restart, verify, or roll back. The remote state is treated as unknown. This includes staging/backup because the fixed staging/backup resources may still be changing even though the live application artifact has not yet been replaced.
 
 It atomically:
 
@@ -153,7 +166,7 @@ An unresolved manual incident survives subsequent restarts and continues to bloc
 Implemented now:
 
 - detect interrupted deployments and started rollback operations;
-- classify pre/post mutation interruption deterministically;
+- classify pre-side-effect versus remotely ambiguous interruption deterministically;
 - terminate stale orchestration records durably;
 - preserve step/transition history;
 - persist resolved or unresolved recovery incidents;
@@ -176,10 +189,12 @@ Automated remote-state inference or automatic post-crash rollback is intentional
 
 `tests/startup_recovery.rs` proves with real SQLite connections that:
 
-- a pre-mutation interruption becomes `FAILED`, its active step is closed, the incident auto-resolves, and a later deployment is allowed;
-- a post-mutation interruption becomes `FAILED` plus an unresolved incident, and a later deployment is blocked;
+- a `PRECHECKING` interruption becomes `FAILED`, its active step is closed, the incident auto-resolves, and a later deployment is allowed;
+- an interrupted `BACKING_UP` deployment becomes `FAILED` plus an unresolved incident, and a later deployment is blocked;
 - a second startup is idempotent and preserves the unresolved guard;
 - a `STARTED` explicit rollback becomes `FAILED`, its rollback reference remains active, and both rollback retry and new deployment remain blocked.
+
+`tests/timeouts.rs` separately proves that staging and backup timeouts retain their non-terminal deployment guards before startup recovery runs.
 
 `tests/recovery_acknowledgement.rs` additionally proves that:
 

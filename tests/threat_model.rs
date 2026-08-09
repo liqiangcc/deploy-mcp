@@ -325,6 +325,41 @@ async fn symlink_inside_allowlist_cannot_escape_before_remote_or_durable_work() 
         .is_empty());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn symlinked_allowed_root_cannot_expand_capability_to_filesystem_root() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let root_link = directory.path().join("root-link");
+    symlink("/", &root_link).unwrap();
+    let artifact = directory.path().join("demo.jar");
+    std::fs::write(&artifact, b"jar-content").unwrap();
+
+    let root = root_link.to_string_lossy().into_owned();
+    let remote = FakeRemoteExecution::default();
+    let repository = Arc::new(Mutex::new(SqliteDeploymentRepository::in_memory().unwrap()));
+    let service = DeployService::new(
+        config(&root),
+        Arc::new(remote.clone()),
+        Arc::clone(&repository),
+    );
+
+    let error = service
+        .deploy(request(&artifact.to_string_lossy()))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::InvalidConfiguration);
+    assert!(error.message.contains("filesystem root"));
+    assert!(remote.calls().is_empty());
+    assert!(repository
+        .lock()
+        .unwrap()
+        .list_non_terminal()
+        .unwrap()
+        .is_empty());
+}
+
 #[tokio::test]
 async fn deployment_remote_calls_are_derived_only_from_configured_capabilities() {
     let directory = tempfile::tempdir().unwrap();

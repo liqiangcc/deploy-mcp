@@ -64,29 +64,19 @@ fn rollback_reference(deployment: &Deployment) -> RollbackReference {
 }
 
 #[test]
-fn pre_mutation_interruption_is_failed_and_auto_resolved() {
+fn pre_side_effect_interruption_is_failed_and_auto_resolved() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("deployments.sqlite");
     let mut deployments = SqliteDeploymentRepository::open(&database).unwrap();
-    let mut interrupted = deployment("pre-mutation");
+    let mut interrupted = deployment("pre-side-effect");
     deployments.create(&interrupted).unwrap();
     advance(
         &mut deployments,
         &mut interrupted,
         DeploymentState::Prechecking,
     );
-    advance(
-        &mut deployments,
-        &mut interrupted,
-        DeploymentState::StagingArtifact,
-    );
-    advance(
-        &mut deployments,
-        &mut interrupted,
-        DeploymentState::BackingUp,
-    );
     deployments
-        .start_step(interrupted.id(), DeploymentStep::BackupCurrent)
+        .start_step(interrupted.id(), DeploymentStep::Precheck)
         .unwrap();
 
     let mut recovery =
@@ -109,31 +99,30 @@ fn pre_mutation_interruption_is_failed_and_auto_resolved() {
         .error
         .as_deref()
         .unwrap()
-        .contains("live-artifact mutation had not started"));
+        .contains("no remote side-effecting deployment step had started"));
     let transitions = deployments.transitions(interrupted.id()).unwrap();
-    assert_eq!(transitions.last().unwrap().from, DeploymentState::BackingUp);
+    assert_eq!(transitions.last().unwrap().from, DeploymentState::Prechecking);
     assert_eq!(transitions.last().unwrap().to, DeploymentState::Failed);
 
     deployments.create(&deployment("next-safe-deploy")).unwrap();
 }
 
 #[test]
-fn post_mutation_interruption_requires_manual_reconciliation_and_blocks_new_deploy() {
+fn interrupted_backup_requires_manual_reconciliation_and_blocks_new_deploy() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("deployments.sqlite");
     let mut deployments = SqliteDeploymentRepository::open(&database).unwrap();
-    let mut interrupted = deployment("post-mutation");
+    let mut interrupted = deployment("ambiguous-backup");
     deployments.create(&interrupted).unwrap();
     for state in [
         DeploymentState::Prechecking,
         DeploymentState::StagingArtifact,
         DeploymentState::BackingUp,
-        DeploymentState::Installing,
     ] {
         advance(&mut deployments, &mut interrupted, state);
     }
     deployments
-        .start_step(interrupted.id(), DeploymentStep::Install)
+        .start_step(interrupted.id(), DeploymentStep::BackupCurrent)
         .unwrap();
 
     let mut recovery =
@@ -154,6 +143,13 @@ fn post_mutation_interruption_requires_manual_reconciliation_and_blocks_new_depl
         deployments.get(interrupted.id()).unwrap().unwrap().state(),
         DeploymentState::Failed
     );
+    let attempts = deployments.step_attempts(interrupted.id()).unwrap();
+    assert_eq!(attempts[0].status, StepAttemptStatus::Failed);
+    assert!(attempts[0]
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("remote side effect may have completed"));
 
     let error = deployments
         .create(&deployment("blocked-deploy"))

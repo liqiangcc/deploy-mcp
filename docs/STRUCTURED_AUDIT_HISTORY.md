@@ -16,10 +16,16 @@ RecoveryRepository facts
    read-only projection
         |
         v
+DeploymentApi
+        |
+        v
+MCP disclosure filter
+        |
+        v
 get_deployment_history
 ```
 
-`AuditRepository` never starts remote work, changes a deployment state, validates rollback eligibility, acknowledges a recovery incident, or owns mutation policy.
+`AuditRepository` never starts remote work, changes a deployment state, validates rollback eligibility, acknowledges a recovery incident, or owns mutation policy. `DeployMcp` owns only the final AI-facing serialization/disclosure rule.
 
 ## No duplicate event store
 
@@ -38,6 +44,8 @@ The existing SQLite tables already contain the authoritative durable lifecycle f
 `SqliteAuditRepository` performs a read-only SQL projection over those records. This avoids double-writing every lifecycle mutation into a second table and avoids creating two competing sources of truth.
 
 Durability therefore comes from the existing transactional source records. Reopening the SQLite database reconstructs the same audit view without replaying an application-side log.
+
+The trusted SQLite records may contain operator-useful free-form error text from failed remote work. That durable diagnostic text is **not** itself the AI disclosure contract. The final MCP adapter filters diagnostic/control fields before serialization.
 
 ## Audit subjects
 
@@ -72,7 +80,7 @@ recovery_incident_recorded
 recovery_acknowledged
 ```
 
-Event-specific data is returned in a structured `attributes` object rather than encoded into free-form message text.
+Event-specific data is represented in a structured `attributes` object rather than requiring consumers to parse a lifecycle message string.
 
 Examples:
 
@@ -146,22 +154,39 @@ Output shape:
 
 The MCP handler remains a protocol adapter. It does not query SQLite directly; it calls the application-owned `DeploymentApi`, which in turn uses the read-only `AuditRepository` port.
 
+Before returning the event, the MCP disclosure filter recursively removes free-form diagnostic/control keys including:
+
+```text
+error
+detail
+stdout
+stderr
+evidence
+shell
+command
+argv
+credentials
+```
+
+This allows the persistence/audit layer to remain a faithful operator-facing observation source without making its free-form diagnostics part of the AI-facing protocol contract.
+
 ## Information boundary
 
-The normal deployment-history tool intentionally does **not** expose remote execution capability details merely because rollback records persist them internally.
+The normal deployment-history tool intentionally does **not** expose remote execution capability details or remote task output merely because durable records persist them internally.
 
-The projection excludes:
+The AI-facing projection excludes:
 
 - remote target identifiers from rollback capability snapshots;
 - backup/install paths;
 - rollback/restart/health task names;
 - SSH credentials or any other credentials;
 - shell fragments or raw commands;
+- raw remote task stdout/stderr and free-form persisted error/detail bodies;
 - operator reconciliation `evidence` text.
 
 The operator identity is included on `recovery_acknowledged` so the history records who asserted reconciliation, but the full evidence remains in the administrative recovery store/CLI boundary.
 
-This separation keeps the AI-facing history useful for diagnosis without turning an observation API into a capability-discovery or secret-disclosure surface.
+This separation keeps the AI-facing history useful for diagnosis without turning an observation API into a capability-discovery, raw-log, or secret-disclosure surface.
 
 ## Ordering semantics
 
@@ -200,4 +225,4 @@ deployment created/succeeded
   -> same structured deployment history recovered
 ```
 
-The test also proves that rollback target/path/task values and operator evidence are absent from the normal structured audit attributes.
+That integration test proves rollback target/path/task values and operator evidence are absent from the normal structured audit attributes. MCP adapter unit coverage additionally injects a sentinel into deployment/rollback failure text, a persisted step error, and nested audit diagnostic fields and proves the serialized AI-facing output does not contain the sentinel.

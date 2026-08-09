@@ -25,11 +25,11 @@ impl StartupRecoveryReport {
 
 /// Reconciles orchestration records left active by a previous process.
 ///
-/// It never calls the remote execution port. Before the live-artifact mutation
-/// boundary, an interrupted deployment can be failed safely. After that
-/// boundary, the deployment/rollback execution is failed but a durable,
-/// unresolved recovery incident keeps the environment fail-closed until an
-/// operator-level acknowledgement proves that a human inspected the state.
+/// It never calls the remote execution port. Before any remote side-effecting
+/// step has started, an interrupted deployment can be failed safely. Once
+/// staging, backup, install, restart, verification, or rollback may have started,
+/// the orchestration record is failed but a durable unresolved recovery incident
+/// keeps the environment fail-closed until an operator inspects the remote state.
 pub struct StartupRecoveryService<R>
 where
     R: RecoveryRepository,
@@ -174,10 +174,10 @@ fn deployment_recovery_reason(
 ) -> String {
     match disposition {
         RecoveryDisposition::AutoResolved => format!(
-            "deploy-mcp restarted while deployment was {state:?}; live-artifact mutation had not started, so the interrupted orchestration was failed without remote recovery work"
+            "deploy-mcp restarted while deployment was {state:?}; no remote side-effecting deployment step had started, so the interrupted orchestration was failed without remote recovery work"
         ),
         RecoveryDisposition::ManualReconciliationRequired => format!(
-            "deploy-mcp restarted while deployment was {state:?}; live-artifact mutation may already have occurred, remote state was not guessed, and manual reconciliation is required"
+            "deploy-mcp restarted while deployment was {state:?}; a remote side effect may have completed or may still be completing, remote state was not guessed, and manual reconciliation is required"
         ),
     }
 }
@@ -315,16 +315,16 @@ mod tests {
     }
 
     #[test]
-    fn recovery_policy_distinguishes_pre_and_post_mutation_interruptions() {
+    fn recovery_policy_distinguishes_preflight_from_remote_side_effects() {
         let repository = FakeRecoveryRepository {
             deployments: vec![
-                deployment(DeploymentState::BackingUp),
+                deployment(DeploymentState::Prechecking),
                 Deployment::rehydrate(
                     DeploymentId::new("d2").unwrap(),
                     ApplicationId::new("demo2").unwrap(),
                     EnvironmentId::new("test").unwrap(),
                     Artifact::new("1.0.0", 1, SHA256).unwrap(),
-                    DeploymentState::Installing,
+                    DeploymentState::BackingUp,
                 ),
             ],
             ..Default::default()

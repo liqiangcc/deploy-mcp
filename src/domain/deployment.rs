@@ -113,7 +113,30 @@ impl DeploymentState {
         )
     }
 
+    /// Returns true once a remote operation with side effects may have started.
+    ///
+    /// This is the durable ambiguity boundary used by timeout/crash handling.
+    /// It intentionally begins at artifact staging, before the live install
+    /// boundary, because a timed-out upload or backup task may continue remotely
+    /// after deploy-mcp stops waiting.
     pub fn has_live_mutation_started(self) -> bool {
+        matches!(
+            self,
+            Self::StagingArtifact
+                | Self::BackingUp
+                | Self::Installing
+                | Self::Restarting
+                | Self::Verifying
+                | Self::RollingBack
+                | Self::RolledBack
+                | Self::RollbackFailed
+        )
+    }
+
+    /// Automatic rollback is a separate concern from remote-side-effect
+    /// ambiguity. A completed failure needs rollback only after the live
+    /// artifact replacement boundary has been crossed.
+    fn has_live_artifact_replacement_started(self) -> bool {
         matches!(
             self,
             Self::Installing
@@ -206,7 +229,7 @@ impl Deployment {
     }
 
     pub fn fail(&mut self, rollback_available: bool) -> Result<(), DeploymentError> {
-        let next = if self.state.has_live_mutation_started() && rollback_available {
+        let next = if self.state.has_live_artifact_replacement_started() && rollback_available {
             DeploymentState::RollingBack
         } else {
             DeploymentState::Failed
@@ -351,7 +374,15 @@ mod tests {
     }
 
     #[test]
-    fn failure_before_live_mutation_does_not_rollback() {
+    fn remote_side_effect_ambiguity_begins_before_live_artifact_replacement() {
+        assert!(!DeploymentState::Prechecking.has_live_mutation_started());
+        assert!(DeploymentState::StagingArtifact.has_live_mutation_started());
+        assert!(DeploymentState::BackingUp.has_live_mutation_started());
+        assert!(DeploymentState::Installing.has_live_mutation_started());
+    }
+
+    #[test]
+    fn failure_before_live_artifact_replacement_does_not_rollback() {
         let mut deployment = deployment();
         deployment.transition(DeploymentState::Prechecking).unwrap();
         deployment

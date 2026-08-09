@@ -26,12 +26,17 @@ type Application = DeploymentApplication<ControlledRemote, SqliteDeploymentRepos
 
 #[derive(Clone, Default)]
 struct ControlledRemote {
+    slow_upload: Arc<Mutex<bool>>,
     slow_task: Arc<Mutex<Option<String>>>,
     failed_task: Arc<Mutex<Option<String>>>,
     task_calls: Arc<Mutex<Vec<String>>>,
 }
 
 impl ControlledRemote {
+    fn set_slow_upload(&self, slow: bool) {
+        *self.slow_upload.lock().expect("slow upload lock poisoned") = slow;
+    }
+
     fn set_slow_task(&self, task: Option<&str>) {
         *self.slow_task.lock().expect("slow task lock poisoned") = task.map(str::to_owned);
     }
@@ -74,6 +79,13 @@ impl RemoteExecutionPort for ControlledRemote {
         _remote_path: &str,
         _overwrite: bool,
     ) -> RemoteExecutionResult<RemoteTransferResult> {
+        let should_sleep = *self
+            .slow_upload
+            .lock()
+            .expect("slow upload lock poisoned");
+        if should_sleep {
+            tokio::time::sleep(Duration::from_millis(75)).await;
+        }
         Ok(RemoteTransferResult {
             bytes_transferred: fs::metadata(local_path)
                 .expect("test artifact metadata")
@@ -209,7 +221,56 @@ fn deploy_request(version: &str, artifact_path: &str) -> DeployRequest {
 }
 
 #[tokio::test]
-async fn deployment_step_timeout_is_durable_and_respects_pre_mutation_boundary() {
+async fn staging_timeout_keeps_durable_guard_until_recovery() {
+    let fixture = fixture(10, 1_000);
+    fixture.remote.set_slow_upload(true);
+
+    let result = fixture
+        .application
+        .deploy_application(deploy_request("1.0.0", &fixture.artifact_path))
+        .await
+        .unwrap();
+    assert_eq!(
+        result.outcome.deployment.state(),
+        DeploymentState::StagingArtifact
+    );
+    let deployment_id = result.outcome.deployment.id().clone();
+    let failure = result.outcome.failure.as_ref().unwrap();
+    assert_eq!(failure.step, DeploymentStep::StageArtifact);
+    assert_eq!(failure.code, ErrorCode::OperationTimedOut);
+    assert!(result.outcome.rollback_failure.is_none());
+    assert!(fixture.remote.task_calls().is_empty());
+
+    let details = fixture
+        .application
+        .get_deployment(deployment_id.as_str())
+        .unwrap();
+    let attempt = details
+        .step_attempts
+        .iter()
+        .find(|attempt| attempt.step == DeploymentStep::StageArtifact)
+        .unwrap();
+    assert_eq!(attempt.status, StepAttemptStatus::Failed);
+    assert!(attempt
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("operation_timed_out"));
+
+    let second = application_for_database(
+        Arc::clone(&fixture.config),
+        fixture.remote.clone(),
+        &fixture.database_path,
+    );
+    let conflict = second
+        .deploy_application(deploy_request("2.0.0", &fixture.artifact_path))
+        .await
+        .unwrap_err();
+    assert_eq!(conflict.code, ErrorCode::ConflictingDeployment);
+}
+
+#[tokio::test]
+async fn backup_timeout_keeps_durable_guard_until_recovery() {
     let fixture = fixture(10, 1_000);
     fixture.remote.set_slow_task(Some("demo-backup"));
 
@@ -218,8 +279,12 @@ async fn deployment_step_timeout_is_durable_and_respects_pre_mutation_boundary()
         .deploy_application(deploy_request("1.0.0", &fixture.artifact_path))
         .await
         .unwrap();
-    assert_eq!(result.outcome.deployment.state(), DeploymentState::Failed);
-    let failure = result.outcome.failure.unwrap();
+    assert_eq!(
+        result.outcome.deployment.state(),
+        DeploymentState::BackingUp
+    );
+    let deployment_id = result.outcome.deployment.id().clone();
+    let failure = result.outcome.failure.as_ref().unwrap();
     assert_eq!(failure.step, DeploymentStep::BackupCurrent);
     assert_eq!(failure.code, ErrorCode::OperationTimedOut);
     assert!(result.outcome.rollback_failure.is_none());
@@ -227,7 +292,7 @@ async fn deployment_step_timeout_is_durable_and_respects_pre_mutation_boundary()
 
     let details = fixture
         .application
-        .get_deployment(result.outcome.deployment.id().as_str())
+        .get_deployment(deployment_id.as_str())
         .unwrap();
     let attempt = details
         .step_attempts
@@ -240,6 +305,18 @@ async fn deployment_step_timeout_is_durable_and_respects_pre_mutation_boundary()
         .as_deref()
         .unwrap_or_default()
         .contains("operation_timed_out"));
+
+    let second = application_for_database(
+        Arc::clone(&fixture.config),
+        fixture.remote.clone(),
+        &fixture.database_path,
+    );
+    let conflict = second
+        .deploy_application(deploy_request("2.0.0", &fixture.artifact_path))
+        .await
+        .unwrap_err();
+    assert_eq!(conflict.code, ErrorCode::ConflictingDeployment);
+    assert_eq!(fixture.remote.task_calls(), vec!["demo-backup"]);
 }
 
 #[tokio::test]

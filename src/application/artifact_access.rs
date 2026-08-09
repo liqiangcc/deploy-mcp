@@ -45,6 +45,12 @@ pub(crate) async fn resolve_allowed_artifact_path(
                 canonical_root.display()
             )));
         }
+        if canonical_root.parent().is_none() {
+            return Err(AppError::invalid_configuration(format!(
+                "canonical local artifact allowed root must not resolve to a filesystem root: {}",
+                canonical_root.display()
+            )));
+        }
         canonical_roots.push(canonical_root);
     }
 
@@ -145,5 +151,24 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::ArtifactPathNotAllowed);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinked_allowed_root_cannot_canonicalize_to_filesystem_root() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let link = directory.path().join("root-link");
+        symlink("/", &link).unwrap();
+        let policy = LocalArtifactConfig {
+            allowed_roots: vec![link.to_string_lossy().into_owned()],
+        };
+
+        let error = resolve_allowed_artifact_path(&policy, "/definitely/missing/demo.jar")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfiguration);
+        assert!(error.message.contains("filesystem root"));
     }
 }

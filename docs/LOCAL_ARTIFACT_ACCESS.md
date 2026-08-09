@@ -37,18 +37,21 @@ Configuration rules:
 - configured roots containing a `..` component are rejected;
 - an omitted or empty `allowed_roots` list disables new local-artifact deployments rather than allowing unrestricted access.
 
-The configured directory is resolved when a deployment needs local artifact access. If a configured root no longer exists, cannot be resolved, or is not a directory, the deployment fails closed with a configuration error.
+The configured directory is resolved when a deployment needs local artifact access. If a configured root no longer exists, cannot be resolved, is not a directory, or canonicalizes to a filesystem root, the deployment fails closed with a configuration error.
+
+The canonical-root check is important because the configured path itself may be a symbolic link. A lexical path such as `/srv/deploy/artifacts` is not accepted as a bounded capability if it resolves to `/`.
 
 ## Runtime authorization
 
 Before deploy-mcp opens or hashes artifact content:
 
 1. each configured allowed root is canonicalized;
-2. the requested artifact path is canonicalized;
-3. the canonical artifact path must be contained by at least one canonical root;
-4. the canonical artifact path is then used for artifact hashing and for `RemoteExecutionPort::upload_file`.
+2. each canonical root is revalidated as a directory and as a non-filesystem-root capability;
+3. the requested artifact path is canonicalized;
+4. the canonical artifact path must be contained by at least one canonical root;
+5. the canonical artifact path is then used for artifact hashing and for `RemoteExecutionPort::upload_file`.
 
-This prevents lexical traversal and symlink escapes from turning an apparently allowed path into a read outside the configured capability boundary.
+This prevents lexical traversal, artifact symlink escapes, and allowed-root symlink expansion from turning an apparently bounded path into a read outside the configured capability boundary.
 
 Examples with `/srv/deploy/artifacts` as the only root:
 
@@ -57,6 +60,7 @@ Examples with `/srv/deploy/artifacts` as the only root:
 /srv/deploy/artifacts/releases/demo.jar         allowed
 /srv/deploy/artifacts/../secrets/key            denied after canonicalization
 /srv/deploy/artifacts/link -> /etc/passwd        denied after canonicalization
+/srv/deploy/artifacts -> /                       invalid capability root
 /etc/passwd                                     denied
 ```
 
@@ -66,7 +70,7 @@ Authorization failure uses the stable application error code:
 artifact_path_not_allowed
 ```
 
-The failure occurs before artifact hashing, deployment reservation/state creation, or any `RemoteExecutionPort` call.
+Invalid configured/canonical roots use `invalid_configuration`. Both failures occur before artifact hashing, deployment reservation/state creation, or any `RemoteExecutionPort` call.
 
 ## Separation of concerns
 

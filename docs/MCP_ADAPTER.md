@@ -15,6 +15,8 @@ AI Agent
 
 The MCP layer does not own deployment state transitions, rollback validity rules, SSH/SFTP, remote command construction, filesystem authorization, task authorization, or audit reconstruction rules.
 
+It **does** own the final AI-facing disclosure shape. Durable repositories may retain trusted-operator diagnostic text, but the MCP adapter must not serialize free-form remote stdout/stderr or equivalent diagnostic payloads back to the AI caller.
+
 ## Current tools
 
 ### `list_applications`
@@ -41,11 +43,24 @@ The local `artifact_path` is the only path accepted from the caller. Remote stag
 
 The input schema rejects undeclared fields. Raw shell, SSH credentials, remote service names, and remote deployment paths are therefore not part of the MCP capability surface.
 
+A deployment outcome exposes structured failure metadata:
+
+```text
+step
+code
+remote_code (when supplied by remote-exec-mcp)
+generic public message
+```
+
+The application layer may retain richer internal diagnostics, but the MCP response does not expose raw remote task stdout/stderr or free-form task failure text.
+
 A successful deployment response also reports whether a durable explicit-rollback reference was recorded. Failure to persist that reference is reported separately and does not rewrite an already successful deployment outcome as failed.
 
 ### `get_deployment`
 
 Read-only. Returns the durable deployment aggregate plus state-transition history and step-attempt history.
+
+Step-attempt lifecycle remains visible, but the persisted free-form `error` body is represented as `details_redacted` rather than being copied to the AI caller.
 
 ### `get_deployment_history`
 
@@ -64,11 +79,13 @@ Input:
 
 The tool is backed by the application-owned read-only `AuditRepository` port. `DeployMcp` does not query SQLite directly and does not reconstruct history from logs.
 
-The normal AI-facing projection intentionally excludes rollback targets, backup/install paths, rollback/restart/health task names, credentials, shell fragments, and operator reconciliation evidence. See `docs/STRUCTURED_AUDIT_HISTORY.md` for the event contract and observation-model boundary.
+Before serialization, the MCP disclosure projection recursively removes free-form diagnostic/control keys such as `error`, `detail`, `stdout`, `stderr`, `evidence`, `shell`, `command`, `argv`, and `credentials`. The normal AI-facing projection also intentionally excludes rollback targets, backup/install paths, rollback/restart/health task names, credentials, shell fragments, and operator reconciliation evidence. See `docs/STRUCTURED_AUDIT_HISTORY.md` for the event contract and observation-model boundary.
 
 ### `list_deployments`
 
 Read-only. Supports an optional application filter and an optional environment filter. Environment requires application. The record count is bounded to `1..=200` and defaults to 50.
+
+It uses the same step-attempt disclosure rule as `get_deployment`; durable free-form step errors are not emitted.
 
 ### `rollback_deployment`
 
@@ -115,6 +132,8 @@ The original `Deployment` remains terminal. Explicit rollback creates an indepen
 
 On explicit rollback success, the operation is marked `SUCCEEDED` and the reference is consumed atomically. On rollback failure, the operation is marked `FAILED` and the reference remains active so a controlled retry is possible.
 
+Explicit rollback failure responses use the same structured-disclosure rule: stable `code`, optional `remote_code`, and a generic public message, never raw task stdout/stderr.
+
 ## Mutation concurrency
 
 Deploy and explicit rollback mutate the same environment and therefore share one mutation boundary.
@@ -126,13 +145,15 @@ Within one process, `DeploymentLockManager` serializes `(application, environmen
 
 SQLite constraints/triggers are the durable authority. Process-local locks are an early rejection optimization, not the correctness boundary.
 
+Timeout safety uses an earlier **remote-side-effect ambiguity boundary** than automatic rollback. A staging upload or backup task that times out leaves the deployment non-terminal so a later mutation cannot race a still-completing remote side effect. See `docs/TIMEOUT_BOUNDARIES.md` and `docs/STARTUP_RECOVERY.md`.
+
 A process crash that leaves a rollback operation in `STARTED` is handled by the Phase 7 startup-recovery policy; until recovered/reconciled, the durable guard intentionally fails closed.
 
 The audit/history projection is read-only and does not participate in mutation exclusion.
 
 ## Error contract
 
-Application failures are returned as structured MCP tool errors:
+Top-level application/tool errors are returned as structured MCP tool errors:
 
 ```json
 {
@@ -141,7 +162,7 @@ Application failures are returned as structured MCP tool errors:
 }
 ```
 
-The MCP handler does not reinterpret deployment or rollback failures from logs or raw command output.
+Deployment and rollback **outcomes** use stable structured failure fields rather than forwarding raw command output. The MCP handler never reconstructs failures from logs, and it never copies remote task stdout/stderr into deployment, rollback, step-attempt, or history responses.
 
 ## Server composition
 
@@ -182,5 +203,6 @@ Dedicated tests cover:
 - environment contract drift rejects rollback before any remote call;
 - the MCP rollback schema rejects caller-supplied remote paths and arbitrary task names;
 - the MCP history schema accepts only deployment id plus a bounded limit and rejects caller-supplied remote execution fields;
+- MCP serialization rejects a sentinel embedded in deployment failure, rollback failure, persisted step error, and nested audit diagnostic attributes;
 - structured history correlates deployment, rollback operation, recovery incident, and operator acknowledgement across separate SQLite repository instances and survives database reopen;
 - normal audit attributes do not expose rollback target/path/task details or reconciliation evidence.
