@@ -152,8 +152,7 @@ fn fixture() -> Fixture {
     let artifact_path = artifact.to_string_lossy().into_owned();
     let config = config(INSTALL_PATH);
     let remote = configured_remote(&artifact_path, bytes.len() as u64);
-    let application =
-        application_for_database(Arc::clone(&config), remote.clone(), &database_path);
+    let application = application_for_database(Arc::clone(&config), remote.clone(), &database_path);
     Fixture {
         _directory: directory,
         database_path,
@@ -192,7 +191,10 @@ async fn explicit_rollback_uses_bound_reference_and_consumes_it_on_success() {
         .rollback_deployment(deployment_id.as_str())
         .await
         .unwrap();
-    assert_eq!(rollback.operation.state(), RollbackOperationState::Succeeded);
+    assert_eq!(
+        rollback.operation.state(),
+        RollbackOperationState::Succeeded
+    );
     assert!(rollback.failure.is_none());
 
     let calls = fixture.remote.calls();
