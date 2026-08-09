@@ -47,10 +47,7 @@ fn structured_history_correlates_deploy_rollback_recovery_and_acknowledgement() 
                 DeploymentState::Prechecking,
                 DeploymentState::StagingArtifact,
             ),
-            (
-                DeploymentState::StagingArtifact,
-                DeploymentState::BackingUp,
-            ),
+            (DeploymentState::StagingArtifact, DeploymentState::BackingUp),
             (DeploymentState::BackingUp, DeploymentState::Installing),
             (DeploymentState::Installing, DeploymentState::Restarting),
             (DeploymentState::Restarting, DeploymentState::Verifying),
@@ -92,10 +89,7 @@ fn structured_history_correlates_deploy_rollback_recovery_and_acknowledgement() 
     {
         let mut recovery = SqliteRecoveryRepository::open(&database_path).unwrap();
         let incident = recovery
-            .recover_rollback_operation(
-                &operation,
-                "process interrupted during explicit rollback",
-            )
+            .recover_rollback_operation(&operation, "process interrupted during explicit rollback")
             .unwrap()
             .unwrap();
         let acknowledgement = RecoveryAcknowledgement::new(
@@ -127,7 +121,10 @@ fn structured_history_correlates_deploy_rollback_recovery_and_acknowledgement() 
             AuditEventKind::RecoveryIncidentRecorded,
             AuditEventKind::RecoveryAcknowledged,
         ] {
-            assert!(kinds.contains(&required), "missing audit event: {required:?}");
+            assert!(
+                kinds.contains(&required),
+                "missing audit event: {required:?}"
+            );
         }
 
         let incident = events
