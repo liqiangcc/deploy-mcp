@@ -185,7 +185,11 @@ fn consumed_reference_snapshot_can_be_pruned_without_losing_operation_history() 
     );
     assert!(rollbacks.get_reference(deployment.id()).unwrap().is_none());
     assert_eq!(
-        rollbacks.get_operation(operation.id()).unwrap().unwrap().state(),
+        rollbacks
+            .get_operation(operation.id())
+            .unwrap()
+            .unwrap()
+            .state(),
         RollbackOperationState::Succeeded
     );
 
