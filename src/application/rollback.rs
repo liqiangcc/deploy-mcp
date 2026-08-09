@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
+use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
 use super::DeploymentLockManager;
@@ -155,50 +156,71 @@ where
         let reference =
             self.rollback_repository(|repository| repository.begin_operation(&operation))?;
 
-        if let Some(failure) = self.preflight(&reference).await {
-            return self.finish_failed(operation_id, deployment_id, failure);
-        }
-        if let Some(failure) = self
-            .run_task(
-                &reference,
-                reference.rollback_task(),
-                BTreeMap::from([
-                    (
-                        "backup_path".to_owned(),
-                        Value::String(reference.backup_path().to_owned()),
+        let timeout_ms = self.config.runtime.explicit_rollback_timeout_ms;
+        let operation_result = timeout(Duration::from_millis(timeout_ms), async {
+            if let Some(failure) = self.preflight(&reference).await {
+                return Some(failure);
+            }
+            if let Some(failure) = self
+                .run_task(
+                    &reference,
+                    reference.rollback_task(),
+                    BTreeMap::from([
+                        (
+                            "backup_path".to_owned(),
+                            Value::String(reference.backup_path().to_owned()),
+                        ),
+                        (
+                            "install_path".to_owned(),
+                            Value::String(reference.install_path().to_owned()),
+                        ),
+                    ]),
+                    "rollback restore task failed",
+                )
+                .await
+            {
+                return Some(failure);
+            }
+            if let Some(failure) = self
+                .run_task(
+                    &reference,
+                    reference.restart_task(),
+                    BTreeMap::new(),
+                    "rollback restart task failed",
+                )
+                .await
+            {
+                return Some(failure);
+            }
+            if let Some(failure) = self
+                .run_task(
+                    &reference,
+                    reference.health_check_task(),
+                    BTreeMap::new(),
+                    "rollback verification task failed",
+                )
+                .await
+            {
+                return Some(failure);
+            }
+            None
+        })
+        .await;
+
+        match operation_result {
+            Ok(Some(failure)) => {
+                return self.finish_failed(operation_id, deployment_id, failure);
+            }
+            Ok(None) => {}
+            Err(_) => {
+                return Err(AppError::new(
+                    ErrorCode::OperationTimedOut,
+                    format!(
+                        "explicit rollback operation {} exceeded {timeout_ms} ms; durable operation remains STARTED and further mutation is blocked until recovery/reconciliation",
+                        operation_id.as_str()
                     ),
-                    (
-                        "install_path".to_owned(),
-                        Value::String(reference.install_path().to_owned()),
-                    ),
-                ]),
-                "rollback restore task failed",
-            )
-            .await
-        {
-            return self.finish_failed(operation_id, deployment_id, failure);
-        }
-        if let Some(failure) = self
-            .run_task(
-                &reference,
-                reference.restart_task(),
-                BTreeMap::new(),
-                "rollback restart task failed",
-            )
-            .await
-        {
-            return self.finish_failed(operation_id, deployment_id, failure);
-        }
-        if let Some(failure) = self
-            .run_task(
-                &reference,
-                reference.health_check_task(),
-                BTreeMap::new(),
-                "rollback verification task failed",
-            )
-            .await
-        {
-            return self.finish_failed(operation_id, deployment_id, failure);
+                ));
+            }
         }
 
         self.rollback_repository(|repository| {

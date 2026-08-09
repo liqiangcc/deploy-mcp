@@ -9,6 +9,8 @@ use crate::error::{AppError, AppResult, ErrorCode};
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub remote_exec: RemoteExecConfig,
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
     pub applications: BTreeMap<String, ApplicationConfig>,
 }
 
@@ -17,6 +19,33 @@ pub struct RemoteExecConfig {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
+}
+
+const MAX_TIMEOUT_MS: u64 = 3_600_000;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RuntimeConfig {
+    #[serde(default = "default_deployment_step_timeout_ms")]
+    pub deployment_step_timeout_ms: u64,
+    #[serde(default = "default_explicit_rollback_timeout_ms")]
+    pub explicit_rollback_timeout_ms: u64,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            deployment_step_timeout_ms: default_deployment_step_timeout_ms(),
+            explicit_rollback_timeout_ms: default_explicit_rollback_timeout_ms(),
+        }
+    }
+}
+
+const fn default_deployment_step_timeout_ms() -> u64 {
+    120_000
+}
+
+const fn default_explicit_rollback_timeout_ms() -> u64 {
+    300_000
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -77,6 +106,14 @@ impl Config {
         for (index, argument) in self.remote_exec.args.iter().enumerate() {
             validate_process_value(&format!("remote_exec.args[{index}]"), argument)?;
         }
+        validate_timeout(
+            "runtime.deployment_step_timeout_ms",
+            self.runtime.deployment_step_timeout_ms,
+        )?;
+        validate_timeout(
+            "runtime.explicit_rollback_timeout_ms",
+            self.runtime.explicit_rollback_timeout_ms,
+        )?;
 
         if self.applications.is_empty() {
             return Err(AppError::invalid_configuration(
@@ -171,6 +208,15 @@ fn validate_process_value(kind: &str, value: &str) -> AppResult<()> {
     if value.contains('\0') {
         return Err(AppError::invalid_configuration(format!(
             "{kind} must not contain NUL"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_timeout(kind: &str, value: u64) -> AppResult<()> {
+    if value == 0 || value > MAX_TIMEOUT_MS {
+        return Err(AppError::invalid_configuration(format!(
+            "{kind} must be between 1 and {MAX_TIMEOUT_MS} milliseconds"
         )));
     }
     Ok(())

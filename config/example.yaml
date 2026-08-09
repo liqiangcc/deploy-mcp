@@ -3,6 +3,10 @@ remote_exec:
   args:
     - /etc/remote-exec/config.yaml
 
+runtime:
+  deployment_step_timeout_ms: 120000
+  explicit_rollback_timeout_ms: 300000
+
 applications:
   demo-service:
     display_name: Demo Service

@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
+use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
 use super::{preflight_remote_capabilities, DeploymentLockManager, RemotePreflightError};
@@ -323,18 +324,22 @@ where
         environment: &EnvironmentConfig,
     ) -> AppResult<Option<DeploymentFailure>> {
         let attempt = self.start_attempt(deployment_id, DeploymentStep::Precheck)?;
-        match preflight_remote_capabilities(self.remote.as_ref(), environment).await {
-            Ok(_) => {
-                self.finish_attempt(attempt, StepAttemptStatus::Succeeded, None)?;
-                Ok(None)
-            }
-            Err(error) => {
-                let failure = preflight_failure(error);
-                let persisted = failure.persisted_message();
-                self.finish_attempt(attempt, StepAttemptStatus::Failed, Some(&persisted))?;
-                Ok(Some(failure))
-            }
-        }
+        let timeout_ms = self.config.runtime.deployment_step_timeout_ms;
+        let result = timeout(
+            Duration::from_millis(timeout_ms),
+            preflight_remote_capabilities(self.remote.as_ref(), environment),
+        )
+        .await;
+        let failure = match result {
+            Ok(Ok(_)) => None,
+            Ok(Err(error)) => Some(preflight_failure(error)),
+            Err(_) => Some(deployment_timeout_failure(
+                DeploymentStep::Precheck,
+                timeout_ms,
+            )),
+        };
+        self.finish_from_failure(attempt, failure.as_ref())?;
+        Ok(failure)
     }
 
     async fn execute_upload(
@@ -345,19 +350,25 @@ where
         expected_bytes: u64,
     ) -> AppResult<Option<DeploymentFailure>> {
         let attempt = self.start_attempt(deployment_id, DeploymentStep::StageArtifact)?;
-        let result = self
-            .remote
-            .upload_file(
+        let timeout_ms = self.config.runtime.deployment_step_timeout_ms;
+        let result = timeout(
+            Duration::from_millis(timeout_ms),
+            self.remote.upload_file(
                 &environment.target,
                 local_path,
                 &environment.staging_path,
                 true,
-            )
-            .await;
+            ),
+        )
+        .await;
 
         let failure = match result {
-            Ok(result) if result.bytes_transferred == expected_bytes => None,
-            Ok(result) => Some(DeploymentFailure::new(
+            Err(_) => Some(deployment_timeout_failure(
+                DeploymentStep::StageArtifact,
+                timeout_ms,
+            )),
+            Ok(Ok(result)) if result.bytes_transferred == expected_bytes => None,
+            Ok(Ok(result)) => Some(DeploymentFailure::new(
                 DeploymentStep::StageArtifact,
                 ErrorCode::ArtifactChanged,
                 format!(
@@ -365,7 +376,7 @@ where
                     result.bytes_transferred
                 ),
             )),
-            Err(error) => Some(DeploymentFailure::from_remote(
+            Ok(Err(error)) => Some(DeploymentFailure::from_remote(
                 DeploymentStep::StageArtifact,
                 ErrorCode::RemoteExecutionFailed,
                 "artifact staging failed",
@@ -389,17 +400,23 @@ where
         action: &str,
     ) -> AppResult<Option<DeploymentFailure>> {
         let attempt = self.start_attempt(deployment_id, step)?;
-        let result = self.remote.run_task(target, task, parameters).await;
+        let timeout_ms = self.config.runtime.deployment_step_timeout_ms;
+        let result = timeout(
+            Duration::from_millis(timeout_ms),
+            self.remote.run_task(target, task, parameters),
+        )
+        .await;
         let failure = match result {
-            Ok(result) if result.success => None,
-            Ok(result) => Some(task_result_failure(
+            Err(_) => Some(deployment_timeout_failure(step, timeout_ms)),
+            Ok(Ok(result)) if result.success => None,
+            Ok(Ok(result)) => Some(task_result_failure(
                 step,
                 failure_code,
                 action,
                 task,
                 &result,
             )),
-            Err(error) => Some(DeploymentFailure::from_remote(
+            Ok(Err(error)) => Some(DeploymentFailure::from_remote(
                 step,
                 failure_code,
                 action,
@@ -623,6 +640,14 @@ async fn load_artifact(version: &str, path: &str) -> AppResult<Artifact> {
     let sha256 = format!("{:x}", digest.finalize());
     Artifact::new(version, actual_size, sha256)
         .map_err(|error| AppError::new(ErrorCode::InvalidArtifact, error.to_string()))
+}
+
+fn deployment_timeout_failure(step: DeploymentStep, timeout_ms: u64) -> DeploymentFailure {
+    DeploymentFailure::new(
+        step,
+        ErrorCode::OperationTimedOut,
+        format!("deployment step {step:?} exceeded {timeout_ms} ms"),
+    )
 }
 
 fn preflight_failure(error: RemotePreflightError) -> DeploymentFailure {

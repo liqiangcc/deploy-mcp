@@ -182,7 +182,7 @@ Acceptance criteria:
 - [x] startup recovery policy for non-terminal deployments and `STARTED` rollback operations
 - [x] operator reconciliation/acknowledgement for unresolved recovery incidents
 - [x] deployment-level structured audit/history
-- [ ] timeouts at deployment-step and explicit-rollback-operation level
+- [x] timeouts at deployment-step and explicit-rollback-operation level
 - [ ] deterministic verification retry policy
 - [ ] rollback-reference retention/cleanup policy
 - [ ] local artifact-path allowlist
@@ -214,6 +214,14 @@ Structured audit/history acceptance criteria:
 - the projection survives SQLite connection/process reopen because it reconstructs from committed durable source facts rather than process-local logs;
 - same-millisecond events are deterministically ordered for rendering, but the tie-break order is not treated as additional causal/state-machine semantics;
 - a dedicated cross-repository test proves deployment -> rollback STARTED -> crash recovery -> manual incident -> operator acknowledgement -> database reopen as one recoverable structured timeline.
+
+Timeout acceptance criteria:
+
+- deployment-step deadlines are configured in deploy-mcp and wrap capability preflight, staging upload, named deployment tasks, and automatic rollback tasks without adding SSH/SFTP behavior to the deployment domain;
+- a timed-out deployment step closes its durable step attempt as `FAILED` with stable `operation_timed_out`, then follows the existing pre/post-mutation rollback rules;
+- explicit rollback has a whole-operation deadline after the durable operation enters `STARTED`; a timeout leaves that operation `STARTED` because remote mutation state is unknown;
+- the existing cross-process mutation guard therefore blocks further deploy/rollback mutation until startup recovery/manual reconciliation resolves the timed-out rollback;
+- timeout configuration is bounded and has safe defaults; timeout handling never exposes raw commands, credentials, or remote paths through new MCP inputs.
 
 Startup recovery acceptance criteria:
 
