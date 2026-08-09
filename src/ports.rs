@@ -254,6 +254,18 @@ pub trait RollbackRepository: Send {
     ) -> RepositoryResult<Option<RollbackOperation>>;
 }
 
+/// Maintenance-only persistence for rollback capability snapshots.
+///
+/// Lifecycle metadata remains in `rollback_references` for audit/history, while
+/// only snapshots for inactive references are eligible for pruning.
+pub trait RollbackRetentionRepository: Send {
+    fn prune_inactive_reference_snapshots(
+        &mut self,
+        cutoff_unix_ms: i64,
+        limit: usize,
+    ) -> RepositoryResult<usize>;
+}
+
 /// Durable recovery persistence is intentionally separate from normal deployment
 /// and rollback repositories. Startup recovery and operator acknowledgement are
 /// administrative safety paths, not branches in the deployment state machine.

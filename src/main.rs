@@ -2,7 +2,9 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
 use deploy_mcp::adapters::RemoteExecMcpAdapter;
-use deploy_mcp::application::{DeploymentApi, DeploymentApplication, StartupRecoveryService};
+use deploy_mcp::application::{
+    DeploymentApi, DeploymentApplication, RollbackRetentionService, StartupRecoveryService,
+};
 use deploy_mcp::audit_persistence::SqliteAuditRepository;
 use deploy_mcp::config::Config;
 use deploy_mcp::domain::RecoveryDisposition;
@@ -58,11 +60,27 @@ async fn main() -> Result<()> {
         SqliteDeploymentRepository::open(&database_path)
             .with_context(|| format!("failed to open deployment database at {database_path}"))?,
     ));
+    let mut rollback_repository = SqliteRollbackRepository::open(&database_path)
+        .with_context(|| format!("failed to open rollback database at {database_path}"))?;
+    let cleanup_batch_size = usize::try_from(config.runtime.rollback_reference_cleanup_batch_size)
+        .context("rollback reference cleanup batch size does not fit usize")?;
+    let mut retention = RollbackRetentionService::new(
+        &mut rollback_repository,
+        config.runtime.rollback_reference_retention_days,
+        cleanup_batch_size,
+    );
+    let retention_report = retention
+        .cleanup()
+        .context("failed to apply rollback-reference retention policy")?;
+    if retention_report.pruned_references > 0 {
+        tracing::info!(
+            pruned_references = retention_report.pruned_references,
+            cutoff_unix_ms = retention_report.cutoff_unix_ms,
+            "pruned inactive rollback-reference capability snapshots"
+        );
+    }
     let rollback_repository: Arc<Mutex<Box<dyn RollbackRepository + Send>>> =
-        Arc::new(Mutex::new(Box::new(
-            SqliteRollbackRepository::open(&database_path)
-                .with_context(|| format!("failed to open rollback database at {database_path}"))?,
-        )));
+        Arc::new(Mutex::new(Box::new(rollback_repository)));
     let audit_repository = Arc::new(
         SqliteAuditRepository::open(&database_path)
             .with_context(|| format!("failed to open audit history database at {database_path}"))?,

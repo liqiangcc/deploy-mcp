@@ -8,6 +8,7 @@ mod deploy;
 mod lock;
 mod preflight;
 mod recovery;
+mod retention;
 mod rollback;
 
 pub use api::{
@@ -21,4 +22,5 @@ pub use recovery::{
     RecoveryAcknowledgementRequest, RecoveryAdminService, StartupRecoveryReport,
     StartupRecoveryService,
 };
+pub use retention::{RollbackRetentionReport, RollbackRetentionService};
 pub use rollback::{RollbackFailure, RollbackOutcome, RollbackRequest, RollbackService};

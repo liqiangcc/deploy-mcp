@@ -12,9 +12,12 @@ use crate::domain::{
     ApplicationId, DeploymentId, EnvironmentId, RollbackOperation, RollbackOperationId,
     RollbackOperationState, RollbackReference, RollbackReferenceState,
 };
-use crate::ports::{RepositoryError, RepositoryResult, RollbackRepository};
+use crate::ports::{
+    RepositoryError, RepositoryResult, RollbackRepository, RollbackRetentionRepository,
+};
 
 const INITIAL_MIGRATION: &str = include_str!("../migrations/001_initial.sql");
+const RETENTION_MIGRATION: &str = include_str!("../migrations/005_rollback_reference_retention.sql");
 
 type ReferenceRow = (
     String,
@@ -46,6 +49,9 @@ impl SqliteRollbackRepository {
     fn from_connection(connection: Connection) -> RepositoryResult<Self> {
         connection
             .execute_batch(INITIAL_MIGRATION)
+            .map_err(storage_error)?;
+        connection
+            .execute_batch(RETENTION_MIGRATION)
             .map_err(storage_error)?;
         Ok(Self { connection })
     }
@@ -140,7 +146,12 @@ impl RollbackRepository for SqliteRollbackRepository {
                 "SELECT deployment_id, application_id, environment_id,
                         target, backup_path, install_path,
                         rollback_task, restart_task, health_check_task, state
-                 FROM rollback_references WHERE deployment_id = ?1",
+                 FROM rollback_references rr
+                 WHERE deployment_id = ?1
+                   AND NOT EXISTS (
+                       SELECT 1 FROM rollback_reference_retention retention
+                       WHERE retention.deployment_id = rr.deployment_id
+                   )",
                 params![deployment_id.as_str()],
                 reference_row,
             )
@@ -301,6 +312,62 @@ impl RollbackRepository for SqliteRollbackRepository {
             .map_err(storage_error)?
             .map(decode_operation)
             .transpose()
+    }
+}
+
+impl RollbackRetentionRepository for SqliteRollbackRepository {
+    fn prune_inactive_reference_snapshots(
+        &mut self,
+        cutoff_unix_ms: i64,
+        limit: usize,
+    ) -> RepositoryResult<usize> {
+        if limit == 0 {
+            return Ok(0);
+        }
+        let limit = i64::try_from(limit)
+            .map_err(|_| RepositoryError::Storage("retention batch size is too large".into()))?;
+        let transaction = self.connection.transaction().map_err(storage_error)?;
+        let pruned_at_unix_ms = now_unix_ms();
+        let inserted = transaction
+            .execute(
+                "INSERT OR IGNORE INTO rollback_reference_retention (
+                     deployment_id, snapshot_pruned_at_unix_ms
+                 )
+                 SELECT rr.deployment_id, ?1
+                 FROM rollback_references rr
+                 WHERE rr.state IN ('superseded', 'consumed')
+                   AND rr.updated_at_unix_ms <= ?2
+                   AND NOT EXISTS (
+                       SELECT 1 FROM rollback_reference_retention retention
+                       WHERE retention.deployment_id = rr.deployment_id
+                   )
+                 ORDER BY rr.updated_at_unix_ms ASC, rr.deployment_id ASC
+                 LIMIT ?3",
+                params![pruned_at_unix_ms, cutoff_unix_ms, limit],
+            )
+            .map_err(storage_error)?;
+        if inserted > 0 {
+            transaction
+                .execute(
+                    "UPDATE rollback_references
+                     SET target = '',
+                         backup_path = '',
+                         install_path = '',
+                         rollback_task = '',
+                         restart_task = '',
+                         health_check_task = ''
+                     WHERE deployment_id IN (
+                         SELECT deployment_id
+                         FROM rollback_reference_retention
+                         WHERE snapshot_pruned_at_unix_ms = ?1
+                     )
+                       AND state IN ('superseded', 'consumed')",
+                    params![pruned_at_unix_ms],
+                )
+                .map_err(storage_error)?;
+        }
+        transaction.commit().map_err(storage_error)?;
+        Ok(inserted)
     }
 }
 

@@ -33,6 +33,10 @@ pub struct RuntimeConfig {
     pub verification_max_attempts: u32,
     #[serde(default = "default_verification_retry_delay_ms")]
     pub verification_retry_delay_ms: u64,
+    #[serde(default = "default_rollback_reference_retention_days")]
+    pub rollback_reference_retention_days: u32,
+    #[serde(default = "default_rollback_reference_cleanup_batch_size")]
+    pub rollback_reference_cleanup_batch_size: u32,
 }
 
 impl Default for RuntimeConfig {
@@ -42,6 +46,9 @@ impl Default for RuntimeConfig {
             explicit_rollback_timeout_ms: default_explicit_rollback_timeout_ms(),
             verification_max_attempts: default_verification_max_attempts(),
             verification_retry_delay_ms: default_verification_retry_delay_ms(),
+            rollback_reference_retention_days: default_rollback_reference_retention_days(),
+            rollback_reference_cleanup_batch_size:
+                default_rollback_reference_cleanup_batch_size(),
         }
     }
 }
@@ -60,6 +67,14 @@ const fn default_verification_max_attempts() -> u32 {
 
 const fn default_verification_retry_delay_ms() -> u64 {
     1_000
+}
+
+const fn default_rollback_reference_retention_days() -> u32 {
+    30
+}
+
+const fn default_rollback_reference_cleanup_batch_size() -> u32 {
+    500
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -130,6 +145,10 @@ impl Config {
         )?;
         validate_verification_attempts(self.runtime.verification_max_attempts)?;
         validate_verification_retry_delay(self.runtime.verification_retry_delay_ms)?;
+        validate_rollback_reference_retention_days(self.runtime.rollback_reference_retention_days)?;
+        validate_rollback_reference_cleanup_batch_size(
+            self.runtime.rollback_reference_cleanup_batch_size,
+        )?;
 
         if self.applications.is_empty() {
             return Err(AppError::invalid_configuration(
@@ -258,6 +277,26 @@ fn validate_verification_retry_delay(value: u64) -> AppResult<()> {
     Ok(())
 }
 
+fn validate_rollback_reference_retention_days(value: u32) -> AppResult<()> {
+    const MAX_RETENTION_DAYS: u32 = 3_650;
+    if value == 0 || value > MAX_RETENTION_DAYS {
+        return Err(AppError::invalid_configuration(format!(
+            "runtime.rollback_reference_retention_days must be between 1 and {MAX_RETENTION_DAYS} days"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_rollback_reference_cleanup_batch_size(value: u32) -> AppResult<()> {
+    const MAX_BATCH_SIZE: u32 = 5_000;
+    if value == 0 || value > MAX_BATCH_SIZE {
+        return Err(AppError::invalid_configuration(format!(
+            "runtime.rollback_reference_cleanup_batch_size must be between 1 and {MAX_BATCH_SIZE}"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,6 +336,8 @@ applications:
             config.application("demo-service").unwrap().artifact_type,
             ArtifactType::Jar
         );
+        assert_eq!(config.runtime.rollback_reference_retention_days, 30);
+        assert_eq!(config.runtime.rollback_reference_cleanup_batch_size, 500);
     }
 
     #[test]
@@ -324,6 +365,27 @@ applications:
         let error = Config::from_yaml(&raw).unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidConfiguration);
         assert!(error.message.contains("restart task must not be empty"));
+    }
+
+    #[test]
+    fn rejects_invalid_rollback_retention_bounds() {
+        let raw = VALID_CONFIG.replace(
+            "applications:",
+            "runtime:\n  rollback_reference_retention_days: 0\napplications:",
+        );
+        let error = Config::from_yaml(&raw).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfiguration);
+        assert!(error.message.contains("rollback_reference_retention_days"));
+
+        let raw = VALID_CONFIG.replace(
+            "applications:",
+            "runtime:\n  rollback_reference_cleanup_batch_size: 5001\napplications:",
+        );
+        let error = Config::from_yaml(&raw).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfiguration);
+        assert!(error
+            .message
+            .contains("rollback_reference_cleanup_batch_size"));
     }
 
     #[test]

@@ -8,6 +8,8 @@ runtime:
   explicit_rollback_timeout_ms: 300000
   verification_max_attempts: 3
   verification_retry_delay_ms: 1000
+  rollback_reference_retention_days: 30
+  rollback_reference_cleanup_batch_size: 500
 
 applications:
   demo-service:
