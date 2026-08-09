@@ -35,6 +35,7 @@ pub struct DeployApplicationArgs {
     pub environment: String,
     pub version: String,
     pub artifact_path: String,
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -69,7 +70,7 @@ impl DeployMcp {
     }
 
     #[tool(
-        description = "Deploy one local JAR to a configured application/environment through the deterministic deployment workflow. The tool accepts deployment intent only; it never accepts shell commands, SSH credentials, service names, or remote install paths."
+        description = "Deploy one local JAR to a configured application/environment through the deterministic deployment workflow. An optional idempotency_key binds one complete deployment intent so exact retries return the original deployment without repeating remote work. The tool never accepts shell commands, SSH credentials, service names, or remote install paths."
     )]
     async fn deploy_application(
         &self,
@@ -82,6 +83,7 @@ impl DeployMcp {
                 environment: args.environment,
                 version: args.version,
                 artifact_path: args.artifact_path,
+                idempotency_key: args.idempotency_key,
             })
             .await
         {
@@ -186,6 +188,7 @@ fn outcome_json(outcome: &DeploymentOutcome) -> Value {
         "deployment": deployment_json(&outcome.deployment),
         "failure": outcome.failure.as_ref().map(failure_json),
         "rollback_failure": outcome.rollback_failure.as_ref().map(failure_json),
+        "idempotent_replay": outcome.idempotent_replay,
     })
 }
 
@@ -329,6 +332,16 @@ mod tests {
             result.structured_content.unwrap()["code"],
             "rollback_unavailable"
         );
+    }
+
+    #[test]
+    fn deploy_tool_accepts_optional_idempotency_key() {
+        let args = serde_json::from_value::<DeployApplicationArgs>(json!({
+            "application": "demo", "environment": "test", "version": "1.0.0",
+            "artifact_path": "/tmp/demo.jar", "idempotency_key": "release-123"
+        }))
+        .unwrap();
+        assert_eq!(args.idempotency_key.as_deref(), Some("release-123"));
     }
 
     #[test]
