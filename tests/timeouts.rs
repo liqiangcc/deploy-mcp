@@ -341,7 +341,10 @@ async fn verification_timeout_is_not_retried_and_keeps_verifying_guard() {
         .deploy_application(deploy_request("1.0.0", &fixture.artifact_path))
         .await
         .unwrap();
-    assert_eq!(result.outcome.deployment.state(), DeploymentState::Verifying);
+    assert_eq!(
+        result.outcome.deployment.state(),
+        DeploymentState::Verifying
+    );
     assert_eq!(
         result.outcome.failure.as_ref().unwrap().code,
         ErrorCode::OperationTimedOut
