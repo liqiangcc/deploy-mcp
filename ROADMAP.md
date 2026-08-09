@@ -180,7 +180,7 @@ Acceptance criteria:
 - [ ] idempotency key support
 - [ ] reject same version with changed checksum
 - [x] startup recovery policy for non-terminal deployments and `STARTED` rollback operations
-- [ ] operator reconciliation/acknowledgement for unresolved recovery incidents
+- [x] operator reconciliation/acknowledgement for unresolved recovery incidents
 - [ ] deployment-level structured audit/history
 - [ ] timeouts at deployment-step and explicit-rollback-operation level
 - [ ] deterministic verification retry policy
@@ -198,12 +198,24 @@ Startup recovery acceptance criteria:
 - an interrupted deployment at or after `INSTALLING` is durably terminated as `FAILED` but creates an unresolved `manual_reconciliation_required` incident because live remote state may be unknown;
 - an interrupted explicit rollback is durably terminated as `FAILED`, preserves its active rollback reference, and creates an unresolved recovery incident;
 - unresolved incidents survive restart and SQLite connection boundaries and block both new deployments and explicit rollbacks for the same application/environment;
-- startup recovery is idempotent and does not create duplicate incidents/transitions on a later restart;
-- clearing an unresolved incident is intentionally not part of automatic startup recovery; it requires the still-open operator reconciliation/acknowledgement hardening item.
+- startup recovery is idempotent and does not create duplicate incidents/transitions on a later restart.
+
+Operator reconciliation acceptance criteria:
+
+- reconciliation is a separate `RecoveryAdminService` / `RecoveryRepository` administrative concern with no `RemoteExecutionPort` dependency;
+- the normal AI-facing MCP server exposes no tool that clears recovery incidents;
+- the separate `deploy-mcp-recovery` CLI can list unresolved incidents and record acknowledgements against the same SQLite database;
+- acknowledgement requires incident id, application, environment, subject kind, subject id, a non-empty operator value, and non-empty evidence;
+- the repository revalidates that the referenced incident is still unresolved, is `manual_reconciliation_required`, and exactly matches every supplied identity field;
+- acknowledgement audit insertion and setting `resolved_at_unix_ms` are committed atomically, so a partial administrative operation cannot release the mutation guard;
+- an identity mismatch, auto-resolved incident, already-resolved incident, or acknowledgement replay cannot release the guard;
+- a successful acknowledgement survives database reopen and permits later deployment/rollback mutation through the ordinary safety checks;
+- `operator` and `evidence` are durable audit metadata, not authentication/authorization; OS/database access controls remain responsible for limiting use of the administrative binary;
+- operator acknowledgement records a human conclusion but never performs remote inspection, remote commands, automated state inference, or automatic post-crash rollback.
 
 ## v0.1 completion boundary
 
-v0.1 is complete when a Java JAR can be deployed to one configured Linux/systemd environment through `remote-exec-mcp`, with durable state, deterministic verification, automatic rollback, safe deployment-bound explicit rollback, fail-closed crash recovery, deployment history, and no unrestricted remote execution surface in deploy-mcp.
+v0.1 is complete when a Java JAR can be deployed to one configured Linux/systemd environment through `remote-exec-mcp`, with durable state, deterministic verification, automatic rollback, safe deployment-bound explicit rollback, fail-closed crash recovery, controlled operator reconciliation, deployment history, and no unrestricted remote execution surface in deploy-mcp.
 
 ## Post-v0.1 candidates
 
