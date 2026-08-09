@@ -248,7 +248,13 @@ applications:
         assert_eq!(details.deployment.id().as_str(), "d1");
         assert!(details.transitions.is_empty());
         assert!(details.step_attempts.is_empty());
-        assert_eq!(application.list_deployments(Some("demo"), Some("test"), 50).unwrap().len(), 1);
+        assert_eq!(
+            application
+                .list_deployments(Some("demo"), Some("test"), 50)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -262,7 +268,10 @@ applications:
             ErrorCode::InvalidRequest
         );
         assert_eq!(
-            application.list_deployments(None, None, 0).unwrap_err().code,
+            application
+                .list_deployments(None, None, 0)
+                .unwrap_err()
+                .code,
             ErrorCode::InvalidRequest
         );
     }

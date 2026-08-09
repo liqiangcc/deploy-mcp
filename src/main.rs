@@ -22,9 +22,8 @@ async fn main() -> Result<()> {
             .with_context(|| format!("failed to load deploy-mcp config from {config_path}"))?,
     );
     let repository = Arc::new(Mutex::new(
-        SqliteDeploymentRepository::open(&database_path).with_context(|| {
-            format!("failed to open deployment database at {database_path}")
-        })?,
+        SqliteDeploymentRepository::open(&database_path)
+            .with_context(|| format!("failed to open deployment database at {database_path}"))?,
     ));
     let remote = Arc::new(
         RemoteExecMcpAdapter::spawn_from_config(&config.remote_exec)
@@ -43,8 +42,8 @@ async fn main() -> Result<()> {
 }
 
 fn startup_paths() -> Result<(String, String)> {
-    let mut config_path = std::env::var("DEPLOY_MCP_CONFIG")
-        .unwrap_or_else(|_| "config/example.yaml".to_owned());
+    let mut config_path =
+        std::env::var("DEPLOY_MCP_CONFIG").unwrap_or_else(|_| "config/example.yaml".to_owned());
     let mut database_path =
         std::env::var("DEPLOY_MCP_DATABASE").unwrap_or_else(|_| "deployments.sqlite".to_owned());
 

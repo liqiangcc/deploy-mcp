@@ -211,8 +211,8 @@ fn tool_error(error: AppError) -> CallToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use crate::error::{AppResult, ErrorCode};
+    use async_trait::async_trait;
 
     struct FakeApi;
 
@@ -227,7 +227,10 @@ mod tests {
             }]
         }
 
-        async fn deploy_application(&self, _request: DeployRequest) -> AppResult<DeploymentOutcome> {
+        async fn deploy_application(
+            &self,
+            _request: DeployRequest,
+        ) -> AppResult<DeploymentOutcome> {
             Err(AppError::new(
                 ErrorCode::UnknownApplication,
                 "unknown application: missing",

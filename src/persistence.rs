@@ -515,19 +515,19 @@ mod tests {
     fn list_filters_and_returns_recent_deployments() {
         let mut repository = SqliteDeploymentRepository::in_memory().unwrap();
         repository.create(&deployment("d1")).unwrap();
-        repository.create(&Deployment::new(
-            DeploymentId::new("d2").unwrap(),
-            ApplicationId::new("other").unwrap(),
-            EnvironmentId::new("prod").unwrap(),
-            Artifact::new("2.0.0", 42, SHA256).unwrap(),
-        )).unwrap();
+        repository
+            .create(&Deployment::new(
+                DeploymentId::new("d2").unwrap(),
+                ApplicationId::new("other").unwrap(),
+                EnvironmentId::new("prod").unwrap(),
+                Artifact::new("2.0.0", 42, SHA256).unwrap(),
+            ))
+            .unwrap();
 
         assert_eq!(repository.list(Some("demo"), None, 50).unwrap().len(), 1);
         assert_eq!(repository.list(None, None, 1).unwrap().len(), 1);
         assert_eq!(
-            repository
-                .list(Some("other"), Some("prod"), 50)
-                .unwrap()[0]
+            repository.list(Some("other"), Some("prod"), 50).unwrap()[0]
                 .id()
                 .as_str(),
             "d2"
