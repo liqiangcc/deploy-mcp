@@ -314,7 +314,11 @@ async fn call_tool(
     let structured = result
         .structured_content
         .unwrap_or_else(|| panic!("{tool} returned no structured content"));
-    assert_ne!(is_error, Some(true), "{tool} returned MCP error: {structured}");
+    assert_ne!(
+        is_error,
+        Some(true),
+        "{tool} returned MCP error: {structured}"
+    );
     structured
 }
 
@@ -341,5 +345,6 @@ fn write_json(path: &Path, value: &Value) {
 }
 
 fn required_env(name: &str) -> String {
-    env::var(name).unwrap_or_else(|_| panic!("required E2E environment variable is missing: {name}"))
+    env::var(name)
+        .unwrap_or_else(|_| panic!("required E2E environment variable is missing: {name}"))
 }
