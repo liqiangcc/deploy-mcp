@@ -14,10 +14,13 @@ if id deploy >/dev/null 2>&1; then
 else
   sudo useradd --create-home --shell /bin/bash deploy
 fi
-# useradd creates a locked password entry on Ubuntu. Unlock the account so
-# sshd permits public-key authentication; password auth remains disabled in
-# the dedicated sshd configuration below.
-sudo passwd -d deploy
+# Ubuntu sshd rejects locked accounts before public-key authentication when
+# UsePAM is disabled. Give this disposable account a high-entropy per-run
+# password only to make it non-locked. The password is never exported, and the
+# dedicated sshd below still disables every password/interactive auth method.
+DEPLOY_ACCOUNT_PASSWORD="$(openssl rand -hex 32)"
+printf 'deploy:%s\n' "$DEPLOY_ACCOUNT_PASSWORD" | sudo chpasswd
+unset DEPLOY_ACCOUNT_PASSWORD
 
 sudo install -d -m 0700 -o deploy -g deploy /home/deploy/.ssh
 sudo install -d -m 0755 -o deploy -g deploy /home/deploy/staging /home/deploy/app /home/deploy/backup

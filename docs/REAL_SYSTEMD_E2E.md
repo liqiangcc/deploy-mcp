@@ -40,6 +40,7 @@ The setup creates:
 - user `deploy`;
 - strict known-host verification with a per-run host key;
 - key-only SSH authentication with a per-run client key;
+- a high-entropy per-run account password only to avoid Ubuntu's locked-account rejection before public-key authentication; it is not exported or persisted, and the dedicated sshd keeps password and interactive authentication disabled;
 - `/home/deploy/staging`, `/home/deploy/app`, and `/home/deploy/backup` capability roots;
 - a real `deploy-mcp-e2e.service` systemd unit;
 - a passwordless sudo rule allowing only `systemctl restart deploy-mcp-e2e.service`;
@@ -63,7 +64,7 @@ The test performs the following through deploy-mcp MCP tools:
 
 ## Running
 
-The workflow is available as `Real remote-exec systemd E2E`. It runs when its own acceptance assets change and can also be invoked manually with `workflow_dispatch`.
+The workflow is available as `Real remote-exec systemd E2E`. It runs for pull requests targeting `main` when deploy-mcp production code, dependency manifests, or E2E assets change; it runs again after those changes land on `main`; and it can also be invoked manually with `workflow_dispatch`.
 
 For local execution, reproduce the disposable target setup on a Linux systemd host, export the environment variables emitted by `setup_real_systemd_target.sh`, set `DEPLOY_MCP_E2E_REMOTE_EXEC_BIN` to a built compatible remote-exec-mcp binary, and run:
 

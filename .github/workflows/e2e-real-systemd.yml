@@ -3,13 +3,23 @@ name: Real remote-exec systemd E2E
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     paths:
+      - src/**
+      - Cargo.toml
+      - Cargo.lock
       - .github/workflows/e2e-real-systemd.yml
       - scripts/e2e/**
       - tests/real_systemd_e2e.rs
       - docs/REAL_SYSTEMD_E2E.md
   pull_request:
+    branches:
+      - main
     paths:
+      - src/**
+      - Cargo.toml
+      - Cargo.lock
       - .github/workflows/e2e-real-systemd.yml
       - scripts/e2e/**
       - tests/real_systemd_e2e.rs
