@@ -11,9 +11,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::domain::{
-    ApplicationId, Artifact, Deployment, DeploymentId, DeploymentState, EnvironmentId,
-    RecoveryAcknowledgement, RecoveryAcknowledgementRecord, RecoveryDisposition, RecoveryIncident,
-    RecoverySubjectKind, RollbackOperation, RollbackOperationId, RollbackOperationState,
+    ApplicationId, Artifact, Deployment, DeploymentId, DeploymentMechanismKind, DeploymentState,
+    EnvironmentId, RecoveryAcknowledgement, RecoveryAcknowledgementRecord, RecoveryDisposition,
+    RecoveryIncident, RecoverySubjectKind, ReleaseIdentity, RollbackOperation, RollbackOperationId,
+    RollbackOperationState,
 };
 use crate::ports::{RecoveryRepository, RepositoryError, RepositoryResult};
 
@@ -21,8 +22,22 @@ const INITIAL_MIGRATION: &str = include_str!("../migrations/001_initial.sql");
 const RECOVERY_MIGRATION: &str = include_str!("../migrations/002_startup_recovery.sql");
 const ACKNOWLEDGEMENT_MIGRATION: &str =
     include_str!("../migrations/003_operator_reconciliation.sql");
+const IDENTITY_MIGRATION: &str = include_str!("../migrations/004_deployment_identity.sql");
+const GENERIC_MODEL_MIGRATION: &str = include_str!("../migrations/006_v0_2_generic_model.sql");
+const ROLLBACK_CAPTURE_MIGRATION: &str =
+    include_str!("../migrations/007_deployment_rollback_capture.sql");
 
-type DeploymentRow = (String, String, String, String, i64, String, String);
+type DeploymentRow = (
+    String,
+    String,
+    String,
+    String,
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+);
 type RollbackRow = (String, String, String, String);
 type IncidentRow = (
     i64,
@@ -61,6 +76,15 @@ impl SqliteRecoveryRepository {
         connection
             .execute_batch(ACKNOWLEDGEMENT_MIGRATION)
             .map_err(storage_error)?;
+        connection
+            .execute_batch(IDENTITY_MIGRATION)
+            .map_err(storage_error)?;
+        connection
+            .execute_batch(GENERIC_MODEL_MIGRATION)
+            .map_err(storage_error)?;
+        connection
+            .execute_batch(ROLLBACK_CAPTURE_MIGRATION)
+            .map_err(storage_error)?;
         Ok(Self { connection })
     }
 }
@@ -70,11 +94,13 @@ impl RecoveryRepository for SqliteRecoveryRepository {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT id, application_id, environment_id,
-                        artifact_version, artifact_size_bytes, artifact_sha256, state
-                 FROM deployments
-                 WHERE state NOT IN ('succeeded', 'failed', 'rolled_back', 'rollback_failed')
-                 ORDER BY created_at_unix_ms, id",
+                "SELECT d.id, d.application_id, d.environment_id,
+                        d.artifact_version, d.artifact_size_bytes, d.artifact_sha256, d.state,
+                        m.mechanism_kind, m.release_identity_json
+                 FROM deployments d
+                 LEFT JOIN deployment_model_metadata m ON m.deployment_id = d.id
+                 WHERE d.state NOT IN ('succeeded', 'failed', 'rolled_back', 'rollback_failed')
+                 ORDER BY d.created_at_unix_ms, d.id",
             )
             .map_err(storage_error)?;
         let rows = statement
@@ -424,18 +450,56 @@ fn deployment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeploymentRow> {
         row.get(4)?,
         row.get(5)?,
         row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
     ))
 }
 
 fn decode_deployment(row: DeploymentRow) -> RepositoryResult<Deployment> {
-    let (id, application, environment, version, size, sha256, state) = row;
+    let (id, application, environment, version, size, sha256, state, mechanism_kind, release_json) =
+        row;
     let size = u64::try_from(size)
         .map_err(|_| RepositoryError::CorruptData("negative artifact size".into()))?;
-    Ok(Deployment::rehydrate(
-        DeploymentId::new(id).map_err(corrupt_domain)?,
-        ApplicationId::new(application).map_err(corrupt_domain)?,
-        EnvironmentId::new(environment).map_err(corrupt_domain)?,
-        Artifact::new(version, size, sha256).map_err(corrupt_domain)?,
+    let id = DeploymentId::new(id).map_err(corrupt_domain)?;
+    let application = ApplicationId::new(application).map_err(corrupt_domain)?;
+    let environment = EnvironmentId::new(environment).map_err(corrupt_domain)?;
+    let legacy_artifact = Artifact::new(version, size, sha256).map_err(corrupt_domain)?;
+    let (mechanism_kind, release_identity) = match (mechanism_kind, release_json) {
+        (None, None) => (
+            DeploymentMechanismKind::JarSystemd,
+            ReleaseIdentity::LocalFile(legacy_artifact.clone()),
+        ),
+        (Some(kind), Some(release_json)) => {
+            let kind = DeploymentMechanismKind::parse(&kind).ok_or_else(|| {
+                RepositoryError::CorruptData(format!("unknown deployment mechanism kind: {kind}"))
+            })?;
+            let release: ReleaseIdentity =
+                serde_json::from_str(&release_json).map_err(|error| {
+                    RepositoryError::CorruptData(format!(
+                        "invalid deployment release identity metadata during recovery: {error}"
+                    ))
+                })?;
+            if let Some(local) = release.local_file() {
+                if local != &legacy_artifact {
+                    return Err(RepositoryError::CorruptData(
+                        "generic recovery release identity does not match legacy local-file columns".into(),
+                    ));
+                }
+            }
+            (kind, release)
+        }
+        _ => {
+            return Err(RepositoryError::CorruptData(
+                "deployment model metadata is partially present during recovery".into(),
+            ));
+        }
+    };
+    Ok(Deployment::rehydrate_with_release(
+        id,
+        application,
+        environment,
+        mechanism_kind,
+        release_identity,
         parse_state(&state)?,
     ))
 }

@@ -11,7 +11,8 @@ use rusqlite::{params, Connection, ErrorCode, OptionalExtension, TransactionBeha
 
 use crate::domain::{
     ApplicationId, Artifact, Deployment, DeploymentId, DeploymentMechanismKind, DeploymentState,
-    DeploymentStep, EnvironmentId, ReleaseIdentity,
+    DeploymentStep, EnvironmentId, MechanismContractFingerprint, ReleaseIdentity,
+    RollbackMechanismSnapshot, RollbackReference, RollbackReferenceState,
 };
 use crate::ports::{
     DeploymentRepository, DeploymentReservation, DeploymentTransition, RepositoryError,
@@ -21,6 +22,8 @@ use crate::ports::{
 const INITIAL_MIGRATION: &str = include_str!("../migrations/001_initial.sql");
 const IDENTITY_MIGRATION: &str = include_str!("../migrations/004_deployment_identity.sql");
 const GENERIC_MODEL_MIGRATION: &str = include_str!("../migrations/006_v0_2_generic_model.sql");
+const ROLLBACK_CAPTURE_MIGRATION: &str =
+    include_str!("../migrations/007_deployment_rollback_capture.sql");
 
 type DeploymentRow = (
     String,
@@ -59,17 +62,17 @@ impl SqliteDeploymentRepository {
         connection
             .execute_batch(GENERIC_MODEL_MIGRATION)
             .map_err(storage_error)?;
+        connection
+            .execute_batch(ROLLBACK_CAPTURE_MIGRATION)
+            .map_err(storage_error)?;
         Ok(Self { connection })
     }
 }
 
 impl DeploymentRepository for SqliteDeploymentRepository {
     fn create(&mut self, deployment: &Deployment) -> RepositoryResult<()> {
-        let artifact = local_artifact(deployment)?;
+        let projection = legacy_storage_projection(deployment)?;
         let now = now_unix_ms();
-        let size = i64::try_from(artifact.size_bytes()).map_err(|_| {
-            RepositoryError::Storage("artifact size does not fit SQLite INTEGER".into())
-        })?;
         let transaction = self.connection.transaction().map_err(storage_error)?;
 
         let result = transaction.execute(
@@ -82,9 +85,9 @@ impl DeploymentRepository for SqliteDeploymentRepository {
                 deployment.id().as_str(),
                 deployment.application().as_str(),
                 deployment.environment().as_str(),
-                artifact.version(),
-                size,
-                artifact.sha256(),
+                projection.version,
+                projection.size_bytes,
+                projection.sha256,
                 state_name(deployment.state()),
                 now,
             ],
@@ -110,10 +113,7 @@ impl DeploymentRepository for SqliteDeploymentRepository {
         deployment: &Deployment,
         idempotency_key: Option<&str>,
     ) -> RepositoryResult<DeploymentReservation> {
-        let artifact = local_artifact(deployment)?;
-        let size = i64::try_from(artifact.size_bytes()).map_err(|_| {
-            RepositoryError::Storage("artifact size does not fit SQLite INTEGER".into())
-        })?;
+        let projection = legacy_storage_projection(deployment)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -143,34 +143,46 @@ impl DeploymentRepository for SqliteDeploymentRepository {
             }
         }
 
-        let version_conflict = transaction
-            .query_row(
-                "SELECT artifact_sha256, artifact_size_bytes
-                 FROM deployments
-                 WHERE application_id = ?1
-                   AND environment_id = ?2
-                   AND artifact_version = ?3
-                   AND (artifact_sha256 <> ?4 OR artifact_size_bytes <> ?5)
-                 LIMIT 1",
-                params![
-                    deployment.application().as_str(),
-                    deployment.environment().as_str(),
-                    artifact.version(),
-                    artifact.sha256(),
-                    size,
-                ],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .optional()
-            .map_err(storage_error)?;
-        if let Some((existing_sha256, _)) = version_conflict {
-            return Err(RepositoryError::ArtifactVersionConflict {
-                application: deployment.application().as_str().to_owned(),
-                environment: deployment.environment().as_str().to_owned(),
-                version: artifact.version().to_owned(),
-                existing_sha256,
-                requested_sha256: artifact.sha256().to_owned(),
-            });
+        {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT d.id, d.application_id, d.environment_id,
+                            d.artifact_version, d.artifact_size_bytes, d.artifact_sha256, d.state,
+                            m.mechanism_kind, m.release_identity_json
+                     FROM deployments d
+                     LEFT JOIN deployment_model_metadata m ON m.deployment_id = d.id
+                     WHERE d.application_id = ?1
+                       AND d.environment_id = ?2
+                       AND d.artifact_version = ?3
+                     ORDER BY d.rowid",
+                )
+                .map_err(storage_error)?;
+            let rows = statement
+                .query_map(
+                    params![
+                        deployment.application().as_str(),
+                        deployment.environment().as_str(),
+                        deployment.release_identity().version(),
+                    ],
+                    deployment_row,
+                )
+                .map_err(storage_error)?;
+            for row in rows {
+                let existing = decode_deployment(row.map_err(storage_error)?)?;
+                if existing.mechanism_kind() != deployment.mechanism_kind()
+                    || existing.release_identity() != deployment.release_identity()
+                {
+                    return Err(RepositoryError::ArtifactVersionConflict {
+                        application: deployment.application().as_str().to_owned(),
+                        environment: deployment.environment().as_str().to_owned(),
+                        version: deployment.release_identity().version().to_owned(),
+                        existing_sha256: release_identity_fingerprint(existing.release_identity()),
+                        requested_sha256: release_identity_fingerprint(
+                            deployment.release_identity(),
+                        ),
+                    });
+                }
+            }
         }
 
         let now = now_unix_ms();
@@ -185,9 +197,9 @@ impl DeploymentRepository for SqliteDeploymentRepository {
                     deployment.id().as_str(),
                     deployment.application().as_str(),
                     deployment.environment().as_str(),
-                    artifact.version(),
-                    size,
-                    artifact.sha256(),
+                    projection.version,
+                    projection.size_bytes,
+                    projection.sha256,
                     state_name(deployment.state()),
                     now,
                 ],
@@ -462,6 +474,104 @@ impl DeploymentRepository for SqliteDeploymentRepository {
         })
         .collect()
     }
+
+    fn persist_rollback_capture(&mut self, reference: &RollbackReference) -> RepositoryResult<()> {
+        let transaction = self.connection.transaction().map_err(storage_error)?;
+        let source = transaction
+            .query_row(
+                "SELECT application_id, environment_id FROM deployments WHERE id = ?1",
+                params![reference.deployment_id().as_str()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(storage_error)?
+            .ok_or_else(|| {
+                RepositoryError::NotFound(reference.deployment_id().as_str().to_owned())
+            })?;
+        if source.0 != reference.application().as_str()
+            || source.1 != reference.environment().as_str()
+        {
+            return Err(RepositoryError::CorruptData(
+                "rollback capture does not match source deployment identity".into(),
+            ));
+        }
+
+        let existing = transaction
+            .query_row(
+                "SELECT d.id, d.application_id, d.environment_id, c.mechanism_kind, c.target,
+                        c.contract_fingerprint, c.mechanism_snapshot_json
+                 FROM deployment_rollback_captures c
+                 JOIN deployments d ON d.id = c.deployment_id
+                 WHERE c.deployment_id = ?1",
+                params![reference.deployment_id().as_str()],
+                rollback_capture_row,
+            )
+            .optional()
+            .map_err(storage_error)?
+            .map(decode_rollback_capture)
+            .transpose()?;
+        if let Some(existing) = existing {
+            return if &existing == reference {
+                Ok(())
+            } else {
+                Err(RepositoryError::CorruptData(
+                    "deployment rollback capture changed after it was persisted".into(),
+                ))
+            };
+        }
+
+        let snapshot_json =
+            serde_json::to_string(reference.mechanism_snapshot()).map_err(|error| {
+                RepositoryError::Storage(format!("serialize deployment rollback capture: {error}"))
+            })?;
+        transaction
+            .execute(
+                "INSERT INTO deployment_rollback_captures (
+                    deployment_id, mechanism_kind, target, contract_fingerprint,
+                    mechanism_snapshot_json, captured_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    reference.deployment_id().as_str(),
+                    reference.mechanism_kind().as_str(),
+                    reference.target(),
+                    reference.contract_fingerprint().as_str(),
+                    snapshot_json,
+                    now_unix_ms(),
+                ],
+            )
+            .map_err(storage_error)?;
+        transaction.commit().map_err(storage_error)
+    }
+
+    fn get_rollback_capture(
+        &self,
+        deployment_id: &DeploymentId,
+    ) -> RepositoryResult<Option<RollbackReference>> {
+        self.connection
+            .query_row(
+                "SELECT d.id, d.application_id, d.environment_id, c.mechanism_kind, c.target,
+                        c.contract_fingerprint, c.mechanism_snapshot_json
+                 FROM deployment_rollback_captures c
+                 JOIN deployments d ON d.id = c.deployment_id
+                 WHERE c.deployment_id = ?1",
+                params![deployment_id.as_str()],
+                rollback_capture_row,
+            )
+            .optional()
+            .map_err(storage_error)?
+            .map(decode_rollback_capture)
+            .transpose()
+    }
+
+    fn clear_rollback_capture(&mut self, deployment_id: &DeploymentId) -> RepositoryResult<()> {
+        self.connection
+            .execute(
+                "DELETE FROM deployment_rollback_captures WHERE deployment_id = ?1",
+                params![deployment_id.as_str()],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
 }
 
 fn same_request_identity(existing: &Deployment, requested: &Deployment) -> bool {
@@ -471,12 +581,38 @@ fn same_request_identity(existing: &Deployment, requested: &Deployment) -> bool 
         && existing.release_identity() == requested.release_identity()
 }
 
-fn local_artifact(deployment: &Deployment) -> RepositoryResult<&Artifact> {
-    deployment.release_identity().local_file().ok_or_else(|| {
-        RepositoryError::Storage(
-            "container release persistence is reserved for the phase 9 mechanism adapter".into(),
-        )
-    })
+struct LegacyStorageProjection<'a> {
+    version: &'a str,
+    size_bytes: i64,
+    sha256: String,
+}
+
+fn legacy_storage_projection(
+    deployment: &Deployment,
+) -> RepositoryResult<LegacyStorageProjection<'_>> {
+    match deployment.release_identity() {
+        ReleaseIdentity::LocalFile(artifact) => Ok(LegacyStorageProjection {
+            version: artifact.version(),
+            size_bytes: i64::try_from(artifact.size_bytes()).map_err(|_| {
+                RepositoryError::Storage("artifact size does not fit SQLite INTEGER".into())
+            })?,
+            sha256: artifact.sha256().to_owned(),
+        }),
+        ReleaseIdentity::ContainerImage(image) => Ok(LegacyStorageProjection {
+            version: image.version(),
+            size_bytes: 1,
+            sha256: image.digest().trim_start_matches("sha256:").to_owned(),
+        }),
+    }
+}
+
+fn release_identity_fingerprint(identity: &ReleaseIdentity) -> String {
+    match identity {
+        ReleaseIdentity::LocalFile(artifact) => artifact.sha256().to_owned(),
+        ReleaseIdentity::ContainerImage(image) => {
+            format!("{}@{}", image.repository(), image.digest())
+        }
+    }
 }
 
 fn insert_deployment_model_metadata(
@@ -613,6 +749,59 @@ fn decode_deployment(row: DeploymentRow) -> RepositoryResult<Deployment> {
     ))
 }
 
+type RollbackCaptureRow = (String, String, String, String, String, String, String);
+
+fn rollback_capture_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RollbackCaptureRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+    ))
+}
+
+fn decode_rollback_capture(row: RollbackCaptureRow) -> RepositoryResult<RollbackReference> {
+    let (
+        deployment_id,
+        application,
+        environment,
+        mechanism_kind,
+        target,
+        fingerprint,
+        snapshot_json,
+    ) = row;
+    let mechanism_kind = DeploymentMechanismKind::parse(&mechanism_kind).ok_or_else(|| {
+        RepositoryError::CorruptData(format!(
+            "unknown rollback capture mechanism kind: {mechanism_kind}"
+        ))
+    })?;
+    let fingerprint = MechanismContractFingerprint::new(fingerprint).map_err(|error| {
+        RepositoryError::CorruptData(format!(
+            "invalid rollback capture contract fingerprint: {error}"
+        ))
+    })?;
+    let snapshot: RollbackMechanismSnapshot =
+        serde_json::from_str(&snapshot_json).map_err(|error| {
+            RepositoryError::CorruptData(format!(
+                "invalid rollback capture snapshot metadata: {error}"
+            ))
+        })?;
+    RollbackReference::rehydrate_with_snapshot(
+        DeploymentId::new(deployment_id).map_err(corrupt_domain)?,
+        ApplicationId::new(application).map_err(corrupt_domain)?,
+        EnvironmentId::new(environment).map_err(corrupt_domain)?,
+        mechanism_kind,
+        target,
+        fingerprint,
+        snapshot,
+        RollbackReferenceState::Active,
+    )
+    .map_err(|error| RepositoryError::CorruptData(format!("invalid rollback capture: {error}")))
+}
+
 fn state_name(state: DeploymentState) -> &'static str {
     match state {
         DeploymentState::Created => "created",
@@ -724,6 +913,23 @@ mod tests {
             ApplicationId::new("demo").unwrap(),
             EnvironmentId::new("test").unwrap(),
             Artifact::new("1.0.0", 42, SHA256).unwrap(),
+        )
+    }
+
+    fn container_deployment(id: &str, digest: &str) -> Deployment {
+        Deployment::new_with_release(
+            DeploymentId::new(id).unwrap(),
+            ApplicationId::new("demo").unwrap(),
+            EnvironmentId::new("test").unwrap(),
+            DeploymentMechanismKind::DockerCompose,
+            ReleaseIdentity::ContainerImage(
+                crate::domain::ContainerImageReleaseIdentity::new(
+                    "2.0.0",
+                    "registry.example.com/demo",
+                    digest,
+                )
+                .unwrap(),
+            ),
         )
     }
 
@@ -969,5 +1175,102 @@ mod tests {
             error,
             RepositoryError::ArtifactVersionConflict { .. }
         ));
+    }
+
+    #[test]
+    fn same_container_version_conflict_checks_complete_history() {
+        const DIGEST_A: &str =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const DIGEST_B: &str =
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut repository = SqliteDeploymentRepository::in_memory().unwrap();
+
+        // `create` intentionally bypasses reservation policy to model a database
+        // upgraded from history that already contains conflicting same-version rows.
+        repository
+            .create(&container_deployment("d-old-b", DIGEST_B))
+            .unwrap();
+        repository
+            .connection
+            .execute(
+                "UPDATE deployments SET state = 'succeeded' WHERE id = ?1",
+                params!["d-old-b"],
+            )
+            .unwrap();
+        repository
+            .create(&container_deployment("d-new-a", DIGEST_A))
+            .unwrap();
+        repository
+            .connection
+            .execute(
+                "UPDATE deployments SET state = 'succeeded' WHERE id = ?1",
+                params!["d-new-a"],
+            )
+            .unwrap();
+
+        let requested = container_deployment("d-request-a", DIGEST_A);
+        let error = repository
+            .reserve(&requested, Some("container-request"))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            RepositoryError::ArtifactVersionConflict { .. }
+        ));
+    }
+
+    #[test]
+    fn docker_rollback_capture_survives_repository_reopen() {
+        const DIGEST: &str =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const PREVIOUS: &str =
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("captures.sqlite");
+        let deployment = container_deployment("d-capture", DIGEST);
+        let id = deployment.id().clone();
+        let snapshot = crate::domain::DockerComposeRollbackSnapshot::new(
+            PREVIOUS,
+            "registry.example.com/demo",
+            "demo",
+            "app",
+            "compose-rollback",
+            "compose-up",
+            "compose-health",
+        )
+        .unwrap();
+        let fingerprint = crate::domain::MechanismContractFingerprint::docker_compose(
+            "test-server",
+            "registry.example.com/demo",
+            "demo",
+            "app",
+            Some("compose-precheck"),
+            "compose-prepare",
+            "compose-current",
+            "compose-apply",
+            "compose-up",
+            "compose-health",
+            "compose-rollback",
+        );
+        let reference = RollbackReference::new_with_snapshot(
+            id.clone(),
+            deployment.application().clone(),
+            deployment.environment().clone(),
+            DeploymentMechanismKind::DockerCompose,
+            "test-server",
+            fingerprint,
+            RollbackMechanismSnapshot::DockerCompose(snapshot),
+        )
+        .unwrap();
+
+        {
+            let mut repository = SqliteDeploymentRepository::open(&path).unwrap();
+            repository.create(&deployment).unwrap();
+            repository.persist_rollback_capture(&reference).unwrap();
+        }
+
+        let mut reopened = SqliteDeploymentRepository::open(&path).unwrap();
+        assert_eq!(reopened.get_rollback_capture(&id).unwrap(), Some(reference));
+        reopened.clear_rollback_capture(&id).unwrap();
+        assert!(reopened.get_rollback_capture(&id).unwrap().is_none());
     }
 }

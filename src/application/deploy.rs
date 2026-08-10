@@ -7,13 +7,17 @@ use uuid::Uuid;
 
 use super::{
     artifact_access::resolve_allowed_artifact_path,
-    mechanism::{DeploymentMechanismPort, JarSystemdMechanism, RollbackMechanismAction},
+    mechanism::{
+        DeploymentMechanismPort, DockerComposeMechanism, JarSystemdMechanism,
+        MechanismPrepareExecution, RollbackMechanismAction,
+    },
     DeploymentLockManager, RemotePreflightError,
 };
 use crate::config::{Config, EnvironmentConfig};
 use crate::domain::{
-    ApplicationId, Artifact, Deployment, DeploymentId, DeploymentLifecycleOperation,
-    DeploymentPlan, DeploymentState, DeploymentStep, EnvironmentId, ReleaseIdentity,
+    ApplicationId, Artifact, ContainerImageReleaseIdentity, Deployment, DeploymentId,
+    DeploymentLifecycleOperation, DeploymentMechanismKind, DeploymentPlan, DeploymentState,
+    DeploymentStep, EnvironmentId, ReleaseIdentity, RollbackReference,
 };
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::ports::{
@@ -28,6 +32,23 @@ pub struct DeployRequest {
     pub version: String,
     pub artifact_path: String,
     pub idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerDeployRequest {
+    pub application: String,
+    pub environment: String,
+    pub version: String,
+    pub digest: String,
+    pub idempotency_key: Option<String>,
+}
+
+struct ResolvedDeployRequest {
+    application: String,
+    environment: String,
+    release: ReleaseIdentity,
+    local_path: Option<String>,
+    idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,7 +105,15 @@ pub struct DeploymentOutcome {
     pub deployment: Deployment,
     pub failure: Option<DeploymentFailure>,
     pub rollback_failure: Option<DeploymentFailure>,
+    pub rollback_reference: Option<RollbackReference>,
     pub idempotent_replay: bool,
+}
+
+struct MechanismTaskSpec<'a> {
+    step: DeploymentStep,
+    operation: DeploymentLifecycleOperation,
+    failure_code: ErrorCode,
+    action: &'a str,
 }
 
 pub struct DeployService<M, D>
@@ -109,6 +138,89 @@ where
             Arc::new(JarSystemdMechanism::new(remote)),
             repository,
         )
+    }
+
+    pub async fn deploy(&self, request: DeployRequest) -> AppResult<DeploymentOutcome> {
+        validate_version(&request.version)?;
+        validate_idempotency_key(request.idempotency_key.as_deref())?;
+        let environment = self
+            .config
+            .environment(&request.application, &request.environment)?;
+        if environment.mechanism.kind != DeploymentMechanismKind::JarSystemd {
+            return Err(AppError::invalid_configuration(
+                "local artifact deployment requires a jar_systemd environment",
+            ));
+        }
+        let _lease = self
+            .locks
+            .try_acquire(&request.application, &request.environment)
+            .ok_or_else(|| conflict_error(&request.application, &request.environment))?;
+        self.reject_durable_conflict(&request.application, &request.environment)?;
+        let artifact_path =
+            resolve_allowed_artifact_path(&self.config.local_artifacts, &request.artifact_path)
+                .await?;
+        let artifact = load_artifact(&request.version, &artifact_path).await?;
+        self.deploy_resolved(ResolvedDeployRequest {
+            application: request.application,
+            environment: request.environment,
+            release: ReleaseIdentity::LocalFile(artifact),
+            local_path: Some(artifact_path),
+            idempotency_key: request.idempotency_key,
+        })
+        .await
+    }
+}
+
+impl<R, D> DeployService<DockerComposeMechanism<R>, D>
+where
+    R: RemoteExecutionPort + ?Sized,
+    D: DeploymentRepository + Send,
+{
+    pub fn new_container(config: Arc<Config>, remote: Arc<R>, repository: Arc<Mutex<D>>) -> Self {
+        Self::with_mechanism(
+            config,
+            Arc::new(DockerComposeMechanism::new(remote)),
+            repository,
+        )
+    }
+
+    pub async fn deploy_container(
+        &self,
+        request: ContainerDeployRequest,
+    ) -> AppResult<DeploymentOutcome> {
+        validate_version(&request.version)?;
+        validate_idempotency_key(request.idempotency_key.as_deref())?;
+        let environment = self
+            .config
+            .environment(&request.application, &request.environment)?;
+        if environment.mechanism.kind != DeploymentMechanismKind::DockerCompose {
+            return Err(AppError::invalid_configuration(
+                "container image deployment requires a docker_compose environment",
+            ));
+        }
+        let _lease = self
+            .locks
+            .try_acquire(&request.application, &request.environment)
+            .ok_or_else(|| conflict_error(&request.application, &request.environment))?;
+        self.reject_durable_conflict(&request.application, &request.environment)?;
+        let repository = environment
+            .mechanism
+            .image_repository
+            .as_deref()
+            .ok_or_else(|| {
+                AppError::invalid_configuration("docker image repository is not configured")
+            })?;
+        let image =
+            ContainerImageReleaseIdentity::new(&request.version, repository, &request.digest)
+                .map_err(|error| AppError::new(ErrorCode::InvalidRequest, error.to_string()))?;
+        self.deploy_resolved(ResolvedDeployRequest {
+            application: request.application,
+            environment: request.environment,
+            release: ReleaseIdentity::ContainerImage(image),
+            local_path: None,
+            idempotency_key: request.idempotency_key,
+        })
+        .await
     }
 }
 
@@ -135,15 +247,10 @@ where
         self
     }
 
-    pub async fn deploy(&self, request: DeployRequest) -> AppResult<DeploymentOutcome> {
-        if request.version.trim().is_empty() {
-            return Err(AppError::new(
-                ErrorCode::InvalidVersion,
-                "version must not be empty",
-            ));
-        }
-        validate_idempotency_key(request.idempotency_key.as_deref())?;
-
+    async fn deploy_resolved(
+        &self,
+        request: ResolvedDeployRequest,
+    ) -> AppResult<DeploymentOutcome> {
         let environment = self
             .config
             .environment(&request.application, &request.environment)?
@@ -156,17 +263,6 @@ where
             )));
         }
 
-        let _lease = self
-            .locks
-            .try_acquire(&request.application, &request.environment)
-            .ok_or_else(|| conflict_error(&request.application, &request.environment))?;
-
-        self.reject_durable_conflict(&request.application, &request.environment)?;
-
-        let artifact_path =
-            resolve_allowed_artifact_path(&self.config.local_artifacts, &request.artifact_path)
-                .await?;
-        let artifact = load_artifact(&request.version, &artifact_path).await?;
         let deployment_id = DeploymentId::new(Uuid::new_v4().to_string()).map_err(|error| {
             AppError::new(
                 ErrorCode::InvalidStateTransition,
@@ -179,13 +275,12 @@ where
         let environment_id = EnvironmentId::new(request.environment.clone()).map_err(|error| {
             AppError::invalid_configuration(format!("invalid configured environment id: {error}"))
         })?;
-
         let mut deployment = Deployment::new_with_release(
             deployment_id.clone(),
             application_id,
             environment_id,
             self.mechanism.kind(),
-            ReleaseIdentity::LocalFile(artifact.clone()),
+            request.release,
         );
         match self.repository(|repository| {
             repository.reserve(&deployment, request.idempotency_key.as_deref())
@@ -196,6 +291,7 @@ where
                     deployment: existing,
                     failure: None,
                     rollback_failure: None,
+                    rollback_reference: None,
                     idempotent_replay: true,
                 });
             }
@@ -214,6 +310,7 @@ where
                 format!("invalid deployment plan: {error}"),
             )
         })?;
+        let mut rollback_reference = None;
 
         self.transition(&mut deployment, DeploymentState::Prechecking)?;
         if let Some(failure) = self
@@ -221,73 +318,73 @@ where
             .await?
         {
             return self
-                .finish_primary_failure(deployment, &plan, &environment, failure)
+                .finish_primary_failure(deployment, &plan, rollback_reference.as_ref(), failure)
                 .await;
         }
         if self.mechanism.precheck_is_configured(&environment) {
             if let Some(failure) = self
                 .execute_mechanism_task(
                     deployment.id(),
-                    DeploymentStep::Precheck,
                     &environment,
-                    DeploymentLifecycleOperation::Precheck,
-                    ErrorCode::PrecheckFailed,
-                    "configured precheck task failed",
+                    deployment.release_identity(),
+                    MechanismTaskSpec {
+                        step: DeploymentStep::Precheck,
+                        operation: DeploymentLifecycleOperation::Precheck,
+                        failure_code: ErrorCode::PrecheckFailed,
+                        action: "configured precheck task failed",
+                    },
                 )
                 .await?
             {
                 return self
-                    .finish_primary_failure(deployment, &plan, &environment, failure)
+                    .finish_primary_failure(deployment, &plan, rollback_reference.as_ref(), failure)
                     .await;
             }
         }
 
         self.transition(&mut deployment, DeploymentState::StagingArtifact)?;
         if let Some(failure) = self
-            .execute_upload(
+            .execute_prepare(
                 deployment.id(),
                 &environment,
-                &artifact_path,
-                deployment.artifact().size_bytes(),
+                deployment.release_identity(),
+                request.local_path.as_deref(),
             )
             .await?
         {
             return self
-                .finish_primary_failure(deployment, &plan, &environment, failure)
+                .finish_primary_failure(deployment, &plan, rollback_reference.as_ref(), failure)
                 .await;
         }
 
         self.transition(&mut deployment, DeploymentState::BackingUp)?;
-        if let Some(failure) = self
-            .execute_mechanism_task(
-                deployment.id(),
-                DeploymentStep::BackupCurrent,
-                &environment,
-                DeploymentLifecycleOperation::CaptureRollback,
-                ErrorCode::RemoteExecutionFailed,
-                "backup task failed",
-            )
-            .await?
-        {
+        let (capture_failure, captured_reference) = self
+            .execute_rollback_capture(&deployment, &environment)
+            .await?;
+        if let Some(failure) = capture_failure {
             return self
-                .finish_primary_failure(deployment, &plan, &environment, failure)
+                .finish_primary_failure(deployment, &plan, rollback_reference.as_ref(), failure)
                 .await;
         }
+        rollback_reference = captured_reference;
 
         self.transition(&mut deployment, DeploymentState::Installing)?;
         if let Some(failure) = self
             .execute_mechanism_task(
                 deployment.id(),
-                DeploymentStep::Install,
                 &environment,
-                DeploymentLifecycleOperation::Apply,
-                ErrorCode::RemoteExecutionFailed,
-                "install task failed",
+                deployment.release_identity(),
+                MechanismTaskSpec {
+                    step: DeploymentStep::Install,
+                    operation: DeploymentLifecycleOperation::Apply,
+                    failure_code: ErrorCode::RemoteExecutionFailed,
+                    action: "install task failed",
+                },
             )
             .await?
         {
             return self
-                .finish_primary_failure(deployment, &plan, &environment, failure)
+                .finish_primary_failure(deployment, &plan, rollback_reference.as_ref(), failure)
                 .await;
         }
 
@@ -295,16 +392,19 @@ where
         if let Some(failure) = self
             .execute_mechanism_task(
                 deployment.id(),
-                DeploymentStep::Restart,
                 &environment,
-                DeploymentLifecycleOperation::Activate,
-                ErrorCode::RemoteExecutionFailed,
-                "restart task failed",
+                deployment.release_identity(),
+                MechanismTaskSpec {
+                    step: DeploymentStep::Restart,
+                    operation: DeploymentLifecycleOperation::Activate,
+                    failure_code: ErrorCode::RemoteExecutionFailed,
+                    action: "restart task failed",
+                },
             )
             .await?
         {
             return self
-                .finish_primary_failure(deployment, &plan, &environment, failure)
+                .finish_primary_failure(deployment, &plan, rollback_reference.as_ref(), failure)
                 .await;
         }
 
@@ -313,13 +413,14 @@ where
             .execute_verification(
                 deployment.id(),
                 &environment,
+                deployment.release_identity(),
                 ErrorCode::VerificationFailed,
                 "health-check task failed",
             )
             .await?
         {
             return self
-                .finish_primary_failure(deployment, &plan, &environment, failure)
+                .finish_primary_failure(deployment, &plan, rollback_reference.as_ref(), failure)
                 .await;
         }
 
@@ -328,6 +429,7 @@ where
             deployment,
             failure: None,
             rollback_failure: None,
+            rollback_reference,
             idempotent_replay: false,
         })
     }
@@ -367,154 +469,153 @@ where
         Ok(failure)
     }
 
-    async fn execute_upload(
+    async fn execute_prepare(
         &self,
         deployment_id: &DeploymentId,
         environment: &EnvironmentConfig,
-        local_path: &str,
-        expected_bytes: u64,
+        release: &ReleaseIdentity,
+        local_path: Option<&str>,
     ) -> AppResult<Option<DeploymentFailure>> {
         let attempt = self.start_attempt(deployment_id, DeploymentStep::StageArtifact)?;
         let timeout_ms = self.config.runtime.deployment_step_timeout_ms;
         let result = timeout(
             Duration::from_millis(timeout_ms),
-            self.mechanism.prepare(environment, local_path),
+            self.mechanism.prepare(environment, release, local_path),
         )
         .await;
-
         let failure = match result {
             Err(_) => Some(deployment_timeout_failure(
                 DeploymentStep::StageArtifact,
                 timeout_ms,
             )),
-            Ok(Ok(result)) if result.bytes_transferred == expected_bytes => None,
-            Ok(Ok(result)) => Some(DeploymentFailure::new(
+            Ok(Ok(MechanismPrepareExecution::FileTransfer(result))) => {
+                let expected = release.local_file().map(Artifact::size_bytes).unwrap_or(0);
+                if result.bytes_transferred == expected {
+                    None
+                } else {
+                    Some(DeploymentFailure::new(
+                        DeploymentStep::StageArtifact,
+                        ErrorCode::ArtifactChanged,
+                        format!(
+                            "staged byte count changed: expected {expected}, transferred {}",
+                            result.bytes_transferred
+                        ),
+                    ))
+                }
+            }
+            Ok(Ok(MechanismPrepareExecution::Task(execution))) if execution.result.success => None,
+            Ok(Ok(MechanismPrepareExecution::Task(execution))) => Some(task_result_failure(
                 DeploymentStep::StageArtifact,
-                ErrorCode::ArtifactChanged,
-                format!(
-                    "staged byte count changed: expected {expected_bytes}, transferred {}",
-                    result.bytes_transferred
-                ),
+                ErrorCode::RemoteExecutionFailed,
+                "release preparation task failed",
+                &execution.task,
+                &execution.result,
             )),
             Ok(Err(error)) => Some(DeploymentFailure::from_remote(
                 DeploymentStep::StageArtifact,
                 ErrorCode::RemoteExecutionFailed,
-                "artifact staging failed",
+                "release preparation failed",
                 error,
             )),
         };
-
         self.finish_from_failure(attempt, failure.as_ref())?;
         Ok(failure)
+    }
+
+    async fn execute_rollback_capture(
+        &self,
+        deployment: &Deployment,
+        environment: &EnvironmentConfig,
+    ) -> AppResult<(Option<DeploymentFailure>, Option<RollbackReference>)> {
+        let attempt = self.start_attempt(deployment.id(), DeploymentStep::BackupCurrent)?;
+        let timeout_ms = self.config.runtime.deployment_step_timeout_ms;
+        let result = timeout(
+            Duration::from_millis(timeout_ms),
+            self.mechanism.capture_rollback(deployment, environment),
+        )
+        .await;
+        let (failure, reference) = match result {
+            Err(_) => (
+                Some(deployment_timeout_failure(
+                    DeploymentStep::BackupCurrent,
+                    timeout_ms,
+                )),
+                None,
+            ),
+            Ok(Ok(capture)) if capture.execution.result.success => (None, capture.reference),
+            Ok(Ok(capture)) => (
+                Some(task_result_failure(
+                    DeploymentStep::BackupCurrent,
+                    ErrorCode::RemoteExecutionFailed,
+                    "rollback capture task failed",
+                    &capture.execution.task,
+                    &capture.execution.result,
+                )),
+                None,
+            ),
+            Ok(Err(error)) => (
+                Some(DeploymentFailure::from_remote(
+                    DeploymentStep::BackupCurrent,
+                    ErrorCode::RemoteExecutionFailed,
+                    "rollback capture failed",
+                    error,
+                )),
+                None,
+            ),
+        };
+        if failure.is_none() {
+            if let Some(reference) = &reference {
+                // Capture is durable before APPLY. If the process crashes after this
+                // point, recovery can remain fail-closed without losing dynamic
+                // rollback state such as the previous container image digest.
+                self.repository(|repository| repository.persist_rollback_capture(reference))?;
+            }
+        }
+        self.finish_from_failure(attempt, failure.as_ref())?;
+        Ok((failure, reference))
     }
 
     async fn execute_mechanism_task(
         &self,
         deployment_id: &DeploymentId,
-        step: DeploymentStep,
         environment: &EnvironmentConfig,
-        lifecycle_operation: DeploymentLifecycleOperation,
-        failure_code: ErrorCode,
-        action: &str,
+        release: &ReleaseIdentity,
+        spec: MechanismTaskSpec<'_>,
     ) -> AppResult<Option<DeploymentFailure>> {
-        let attempt = self.start_attempt(deployment_id, step)?;
+        let attempt = self.start_attempt(deployment_id, spec.step)?;
         let timeout_ms = self.config.runtime.deployment_step_timeout_ms;
         let result = timeout(
             Duration::from_millis(timeout_ms),
-            self.mechanism.execute(environment, lifecycle_operation),
+            self.mechanism.execute(environment, release, spec.operation),
         )
         .await;
         let failure = match result {
-            Err(_) => Some(deployment_timeout_failure(step, timeout_ms)),
+            Err(_) => Some(deployment_timeout_failure(spec.step, timeout_ms)),
             Ok(Ok(execution)) if execution.result.success => None,
             Ok(Ok(execution)) => Some(task_result_failure(
-                step,
-                failure_code,
-                action,
+                spec.step,
+                spec.failure_code,
+                spec.action,
                 &execution.task,
                 &execution.result,
             )),
             Ok(Err(error)) => Some(DeploymentFailure::from_remote(
-                step,
-                failure_code,
-                action,
+                spec.step,
+                spec.failure_code,
+                spec.action,
                 error,
             )),
         };
 
         self.finish_from_failure(attempt, failure.as_ref())?;
         Ok(failure)
-    }
-
-    async fn execute_current_rollback_task(
-        &self,
-        deployment_id: &DeploymentId,
-        step: DeploymentStep,
-        environment: &EnvironmentConfig,
-        action: RollbackMechanismAction,
-        message: &str,
-    ) -> AppResult<Option<DeploymentFailure>> {
-        let attempt = self.start_attempt(deployment_id, step)?;
-        let timeout_ms = self.config.runtime.deployment_step_timeout_ms;
-        let result = timeout(
-            Duration::from_millis(timeout_ms),
-            self.mechanism.execute_current_rollback(environment, action),
-        )
-        .await;
-        let failure = match result {
-            Err(_) => Some(deployment_timeout_failure(step, timeout_ms)),
-            Ok(Ok(execution)) if execution.result.success => None,
-            Ok(Ok(execution)) => Some(task_result_failure(
-                step,
-                ErrorCode::RollbackFailed,
-                message,
-                &execution.task,
-                &execution.result,
-            )),
-            Ok(Err(error)) => Some(DeploymentFailure::from_remote(
-                step,
-                ErrorCode::RollbackFailed,
-                message,
-                error,
-            )),
-        };
-        self.finish_from_failure(attempt, failure.as_ref())?;
-        Ok(failure)
-    }
-
-    async fn execute_current_rollback_verification(
-        &self,
-        deployment_id: &DeploymentId,
-        environment: &EnvironmentConfig,
-    ) -> AppResult<Option<DeploymentFailure>> {
-        let max_attempts = self.config.runtime.verification_max_attempts;
-        let retry_delay_ms = self.config.runtime.verification_retry_delay_ms;
-        for attempt in 1..=max_attempts {
-            let failure = self
-                .execute_current_rollback_task(
-                    deployment_id,
-                    DeploymentStep::Verify,
-                    environment,
-                    RollbackMechanismAction::Verify,
-                    "rollback verification task failed",
-                )
-                .await?;
-            match failure {
-                None => return Ok(None),
-                Some(failure) if failure.code == ErrorCode::OperationTimedOut => {
-                    return Ok(Some(failure));
-                }
-                Some(failure) if attempt == max_attempts => return Ok(Some(failure)),
-                Some(_) => sleep(Duration::from_millis(retry_delay_ms)).await,
-            }
-        }
-        unreachable!("validated verification policy always has at least one attempt")
     }
 
     async fn execute_verification(
         &self,
         deployment_id: &DeploymentId,
         environment: &EnvironmentConfig,
+        release: &ReleaseIdentity,
         failure_code: ErrorCode,
         action: &str,
     ) -> AppResult<Option<DeploymentFailure>> {
@@ -524,11 +625,14 @@ where
             let failure = self
                 .execute_mechanism_task(
                     deployment_id,
-                    DeploymentStep::Verify,
                     environment,
-                    DeploymentLifecycleOperation::Verify,
-                    failure_code,
-                    action,
+                    release,
+                    MechanismTaskSpec {
+                        step: DeploymentStep::Verify,
+                        operation: DeploymentLifecycleOperation::Verify,
+                        failure_code,
+                        action,
+                    },
                 )
                 .await?;
             match failure {
@@ -547,7 +651,7 @@ where
         &self,
         mut deployment: Deployment,
         plan: &DeploymentPlan,
-        environment: &EnvironmentConfig,
+        rollback_reference: Option<&RollbackReference>,
         failure: DeploymentFailure,
     ) -> AppResult<DeploymentOutcome> {
         if failure.code == ErrorCode::OperationTimedOut
@@ -557,22 +661,29 @@ where
                 deployment,
                 failure: Some(failure),
                 rollback_failure: None,
+                rollback_reference: rollback_reference.cloned(),
                 idempotent_replay: false,
             });
         }
-
         if !plan.requires_rollback_after_failure(failure.step) {
             self.transition(&mut deployment, DeploymentState::Failed)?;
             return Ok(DeploymentOutcome {
                 deployment,
                 failure: Some(failure),
                 rollback_failure: None,
+                rollback_reference: rollback_reference.cloned(),
                 idempotent_replay: false,
             });
         }
-
         self.transition(&mut deployment, DeploymentState::RollingBack)?;
-        let rollback_failure = self.execute_rollback(deployment.id(), environment).await?;
+        let rollback_failure = match rollback_reference {
+            Some(reference) => self.execute_rollback(deployment.id(), reference).await?,
+            None => Some(DeploymentFailure::new(
+                DeploymentStep::Install,
+                ErrorCode::RollbackUnavailable,
+                "rollback was required but no deployment-bound rollback point was captured",
+            )),
+        };
         if rollback_failure
             .as_ref()
             .is_some_and(|failure| failure.code == ErrorCode::OperationTimedOut)
@@ -581,18 +692,22 @@ where
                 deployment,
                 failure: Some(failure),
                 rollback_failure,
+                rollback_reference: rollback_reference.cloned(),
                 idempotent_replay: false,
             });
         }
         match rollback_failure {
-            None => self.transition(&mut deployment, DeploymentState::RolledBack)?,
+            None => {
+                self.transition(&mut deployment, DeploymentState::RolledBack)?;
+                self.repository(|repository| repository.clear_rollback_capture(deployment.id()))?;
+            }
             Some(_) => self.transition(&mut deployment, DeploymentState::RollbackFailed)?,
         }
-
         Ok(DeploymentOutcome {
             deployment,
             failure: Some(failure),
             rollback_failure,
+            rollback_reference: rollback_reference.cloned(),
             idempotent_replay: false,
         })
     }
@@ -600,46 +715,70 @@ where
     async fn execute_rollback(
         &self,
         deployment_id: &DeploymentId,
-        environment: &EnvironmentConfig,
+        reference: &RollbackReference,
     ) -> AppResult<Option<DeploymentFailure>> {
-        if !self.mechanism.rollback_is_configured(environment) {
-            return Ok(Some(DeploymentFailure::new(
+        for (step, action, message) in [
+            (
                 DeploymentStep::Install,
-                ErrorCode::RollbackUnavailable,
-                "rollback was required but no rollback task is configured",
-            )));
-        }
-
-        if let Some(failure) = self
-            .execute_current_rollback_task(
-                deployment_id,
-                DeploymentStep::Install,
-                environment,
                 RollbackMechanismAction::Restore,
                 "rollback restore task failed",
-            )
-            .await?
-        {
-            return Ok(Some(failure));
-        }
-
-        if let Some(failure) = self
-            .execute_current_rollback_task(
-                deployment_id,
+            ),
+            (
                 DeploymentStep::Restart,
-                environment,
                 RollbackMechanismAction::Activate,
-                "rollback restart task failed",
+                "rollback activation task failed",
+            ),
+        ] {
+            let attempt = self.start_attempt(deployment_id, step)?;
+            let timeout_ms = self.config.runtime.deployment_step_timeout_ms;
+            let result = timeout(
+                Duration::from_millis(timeout_ms),
+                self.mechanism.execute_rollback(reference, action),
             )
-            .await?
-        {
-            return Ok(Some(failure));
+            .await;
+            let failure = rollback_execution_failure(step, message, timeout_ms, result);
+            self.finish_from_failure(attempt, failure.as_ref())?;
+            if failure.is_some() {
+                return Ok(failure);
+            }
         }
 
-        self.execute_current_rollback_verification(deployment_id, environment)
-            .await
+        let max_attempts = self.config.runtime.verification_max_attempts;
+        for attempt_number in 1..=max_attempts {
+            let step = DeploymentStep::Verify;
+            let attempt = self.start_attempt(deployment_id, step)?;
+            let timeout_ms = self.config.runtime.deployment_step_timeout_ms;
+            let result = timeout(
+                Duration::from_millis(timeout_ms),
+                self.mechanism
+                    .execute_rollback(reference, RollbackMechanismAction::Verify),
+            )
+            .await;
+            let failure = rollback_execution_failure(
+                step,
+                "rollback verification task failed",
+                timeout_ms,
+                result,
+            );
+            self.finish_from_failure(attempt, failure.as_ref())?;
+            match failure {
+                None => return Ok(None),
+                Some(failure)
+                    if failure.code == ErrorCode::OperationTimedOut
+                        || attempt_number == max_attempts =>
+                {
+                    return Ok(Some(failure))
+                }
+                Some(_) => {
+                    sleep(Duration::from_millis(
+                        self.config.runtime.verification_retry_delay_ms,
+                    ))
+                    .await
+                }
+            }
+        }
+        unreachable!("validated verification policy always has at least one attempt")
     }
-
     fn transition(&self, deployment: &mut Deployment, next: DeploymentState) -> AppResult<()> {
         let from = deployment.state();
         let mut candidate = deployment.clone();
@@ -691,6 +830,44 @@ where
         })?;
         operation(&mut *repository).map_err(repository_error)
     }
+}
+
+fn rollback_execution_failure(
+    step: DeploymentStep,
+    message: &str,
+    timeout_ms: u64,
+    result: Result<
+        Result<super::MechanismTaskExecution, RemoteExecutionError>,
+        tokio::time::error::Elapsed,
+    >,
+) -> Option<DeploymentFailure> {
+    match result {
+        Err(_) => Some(deployment_timeout_failure(step, timeout_ms)),
+        Ok(Ok(execution)) if execution.result.success => None,
+        Ok(Ok(execution)) => Some(task_result_failure(
+            step,
+            ErrorCode::RollbackFailed,
+            message,
+            &execution.task,
+            &execution.result,
+        )),
+        Ok(Err(error)) => Some(DeploymentFailure::from_remote(
+            step,
+            ErrorCode::RollbackFailed,
+            message,
+            error,
+        )),
+    }
+}
+
+fn validate_version(version: &str) -> AppResult<()> {
+    if version.trim().is_empty() {
+        return Err(AppError::new(
+            ErrorCode::InvalidVersion,
+            "version must not be empty",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_idempotency_key(key: Option<&str>) -> AppResult<()> {

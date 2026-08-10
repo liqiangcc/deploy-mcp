@@ -56,6 +56,36 @@ impl MechanismContractFingerprint {
         hash_field(&mut hasher, snapshot.health_check_task());
         Self(format!("{:x}", hasher.finalize()))
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn docker_compose(
+        target: &str,
+        image_repository: &str,
+        compose_project: &str,
+        service: &str,
+        precheck_task: Option<&str>,
+        prepare_task: &str,
+        capture_rollback_task: &str,
+        apply_task: &str,
+        activate_task: &str,
+        health_check_task: &str,
+        rollback_task: &str,
+    ) -> Self {
+        let mut hasher = Sha256::new();
+        hash_field(&mut hasher, DeploymentMechanismKind::DockerCompose.as_str());
+        hash_field(&mut hasher, target);
+        hash_field(&mut hasher, image_repository);
+        hash_field(&mut hasher, compose_project);
+        hash_field(&mut hasher, service);
+        hash_field(&mut hasher, precheck_task.unwrap_or(""));
+        hash_field(&mut hasher, prepare_task);
+        hash_field(&mut hasher, capture_rollback_task);
+        hash_field(&mut hasher, apply_task);
+        hash_field(&mut hasher, activate_task);
+        hash_field(&mut hasher, health_check_task);
+        hash_field(&mut hasher, rollback_task);
+        Self(format!("{:x}", hasher.finalize()))
+    }
 }
 
 fn hash_field(hasher: &mut Sha256, value: &str) {
@@ -108,9 +138,68 @@ impl JarSystemdRollbackSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DockerComposeRollbackSnapshot {
+    previous_digest: String,
+    image_repository: String,
+    compose_project: String,
+    service: String,
+    rollback_task: String,
+    activate_task: String,
+    health_check_task: String,
+}
+
+impl DockerComposeRollbackSnapshot {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        previous_digest: impl Into<String>,
+        image_repository: impl Into<String>,
+        compose_project: impl Into<String>,
+        service: impl Into<String>,
+        rollback_task: impl Into<String>,
+        activate_task: impl Into<String>,
+        health_check_task: impl Into<String>,
+    ) -> Result<Self, RollbackError> {
+        let previous_digest = previous_digest.into();
+        validate_digest(&previous_digest)?;
+        Ok(Self {
+            previous_digest: previous_digest.to_ascii_lowercase(),
+            image_repository: non_empty("image_repository", image_repository.into())?,
+            compose_project: non_empty("compose_project", compose_project.into())?,
+            service: non_empty("service", service.into())?,
+            rollback_task: non_empty("rollback_task", rollback_task.into())?,
+            activate_task: non_empty("activate_task", activate_task.into())?,
+            health_check_task: non_empty("health_check_task", health_check_task.into())?,
+        })
+    }
+
+    pub fn previous_digest(&self) -> &str {
+        &self.previous_digest
+    }
+    pub fn image_repository(&self) -> &str {
+        &self.image_repository
+    }
+    pub fn compose_project(&self) -> &str {
+        &self.compose_project
+    }
+    pub fn service(&self) -> &str {
+        &self.service
+    }
+    pub fn rollback_task(&self) -> &str {
+        &self.rollback_task
+    }
+    pub fn activate_task(&self) -> &str {
+        &self.activate_task
+    }
+    pub fn health_check_task(&self) -> &str {
+        &self.health_check_task
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "snapshot", rename_all = "snake_case")]
 pub enum RollbackMechanismSnapshot {
     JarSystemd(JarSystemdRollbackSnapshot),
+    DockerCompose(DockerComposeRollbackSnapshot),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,6 +385,13 @@ impl RollbackReference {
     pub fn jar_systemd_snapshot(&self) -> Option<&JarSystemdRollbackSnapshot> {
         match &self.mechanism_snapshot {
             RollbackMechanismSnapshot::JarSystemd(snapshot) => Some(snapshot),
+            RollbackMechanismSnapshot::DockerCompose(_) => None,
+        }
+    }
+    pub fn docker_compose_snapshot(&self) -> Option<&DockerComposeRollbackSnapshot> {
+        match &self.mechanism_snapshot {
+            RollbackMechanismSnapshot::DockerCompose(snapshot) => Some(snapshot),
+            RollbackMechanismSnapshot::JarSystemd(_) => None,
         }
     }
     pub fn backup_path(&self) -> &str {
@@ -337,8 +433,21 @@ fn snapshot_matches_kind(
         (
             DeploymentMechanismKind::JarSystemd,
             RollbackMechanismSnapshot::JarSystemd(_)
+        ) | (
+            DeploymentMechanismKind::DockerCompose,
+            RollbackMechanismSnapshot::DockerCompose(_)
         )
     )
+}
+
+fn validate_digest(value: &str) -> Result<(), RollbackError> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return Err(RollbackError::InvalidContainerDigest);
+    };
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(RollbackError::InvalidContainerDigest);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -427,6 +536,8 @@ pub enum RollbackError {
     InvalidContractFingerprint,
     #[error("rollback mechanism snapshot does not match mechanism kind")]
     MechanismSnapshotMismatch,
+    #[error("container rollback digest must be immutable sha256:<64 hex>")]
+    InvalidContainerDigest,
 }
 
 #[cfg(test)]

@@ -11,8 +11,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::application::{
-    ApplicationSummary, DeployRequest, DeploymentApi, DeploymentDetails, DeploymentExecutionResult,
-    DeploymentFailure, DeploymentOutcome, RollbackFailure, RollbackOutcome,
+    ApplicationSummary, ContainerDeployRequest, DeployRequest, DeploymentApi, DeploymentDetails,
+    DeploymentExecutionResult, DeploymentFailure, DeploymentOutcome, RollbackFailure,
+    RollbackOutcome,
 };
 use crate::domain::{Deployment, RollbackOperation};
 use crate::error::AppError;
@@ -34,8 +35,15 @@ pub struct DeployApplicationArgs {
     pub application: String,
     pub environment: String,
     pub version: String,
-    pub artifact_path: String,
+    pub artifact_path: Option<String>,
+    pub release: Option<DeployReleaseArgs>,
     pub idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DeployReleaseArgs {
+    ContainerImage { digest: String },
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -77,23 +85,45 @@ impl DeployMcp {
     }
 
     #[tool(
-        description = "Deploy one local JAR to a configured application/environment through the deterministic deployment workflow. An optional idempotency_key binds one complete deployment intent so exact retries return the original deployment without repeating remote work. The tool never accepts shell commands, SSH credentials, service names, or remote install paths."
+        description = "Deploy one release to a configured application/environment through the deterministic deployment workflow. Existing JAR deployments use artifact_path; Docker Compose deployments use a typed container_image release with an immutable sha256 digest. Trusted configuration selects the mechanism, target, repository, Compose project/service, and named tasks. The tool never accepts shell commands, SSH credentials, remote paths, Docker commands, or caller-selected deployment targets."
     )]
     async fn deploy_application(
         &self,
         Parameters(args): Parameters<DeployApplicationArgs>,
     ) -> CallToolResult {
-        match self
-            .application
-            .deploy_application(DeployRequest {
-                application: args.application,
-                environment: args.environment,
-                version: args.version,
-                artifact_path: args.artifact_path,
-                idempotency_key: args.idempotency_key,
-            })
-            .await
-        {
+        let result = match (args.artifact_path, args.release) {
+            (Some(artifact_path), None) => {
+                self.application
+                    .deploy_application(DeployRequest {
+                        application: args.application,
+                        environment: args.environment,
+                        version: args.version,
+                        artifact_path,
+                        idempotency_key: args.idempotency_key,
+                    })
+                    .await
+            }
+            (None, Some(DeployReleaseArgs::ContainerImage { digest })) => {
+                self.application
+                    .deploy_container_application(ContainerDeployRequest {
+                        application: args.application,
+                        environment: args.environment,
+                        version: args.version,
+                        digest,
+                        idempotency_key: args.idempotency_key,
+                    })
+                    .await
+            }
+            (Some(_), Some(_)) => Err(AppError::new(
+                crate::error::ErrorCode::InvalidRequest,
+                "artifact_path and release are mutually exclusive",
+            )),
+            (None, None) => Err(AppError::new(
+                crate::error::ErrorCode::InvalidRequest,
+                "either artifact_path or release must be provided",
+            )),
+        };
+        match result {
             Ok(result) => CallToolResult::structured(execution_result_json(&result)),
             Err(error) => tool_error(error),
         }
@@ -178,17 +208,39 @@ fn application_json(application: &ApplicationSummary) -> Value {
 }
 
 fn deployment_json(deployment: &Deployment) -> Value {
-    json!({
+    let mut value = json!({
         "id": deployment.id().as_str(),
         "application": deployment.application().as_str(),
         "environment": deployment.environment().as_str(),
-        "artifact": {
-            "version": deployment.artifact().version(),
-            "size_bytes": deployment.artifact().size_bytes(),
-            "sha256": deployment.artifact().sha256(),
-        },
+        "mechanism": deployment.mechanism_kind().as_str(),
         "state": deployment.state(),
-    })
+    });
+    if let Some(object) = value.as_object_mut() {
+        match deployment.release_identity() {
+            crate::domain::ReleaseIdentity::LocalFile(artifact) => {
+                object.insert(
+                    "artifact".to_owned(),
+                    json!({
+                        "version": artifact.version(),
+                        "size_bytes": artifact.size_bytes(),
+                        "sha256": artifact.sha256(),
+                    }),
+                );
+            }
+            crate::domain::ReleaseIdentity::ContainerImage(image) => {
+                object.insert(
+                    "release".to_owned(),
+                    json!({
+                        "type": "container_image",
+                        "version": image.version(),
+                        "repository": image.repository(),
+                        "digest": image.digest(),
+                    }),
+                );
+            }
+        }
+    }
+    value
 }
 
 fn execution_result_json(result: &DeploymentExecutionResult) -> Value {
@@ -362,6 +414,15 @@ mod tests {
         async fn deploy_application(
             &self,
             _request: DeployRequest,
+        ) -> AppResult<DeploymentExecutionResult> {
+            Err(AppError::new(
+                ErrorCode::UnknownApplication,
+                "unknown application: missing",
+            ))
+        }
+        async fn deploy_container_application(
+            &self,
+            _request: ContainerDeployRequest,
         ) -> AppResult<DeploymentExecutionResult> {
             Err(AppError::new(
                 ErrorCode::UnknownApplication,

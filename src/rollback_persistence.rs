@@ -120,11 +120,7 @@ impl RollbackRepository for SqliteRollbackRepository {
             )
             .map_err(storage_error)?;
 
-        let snapshot = reference.jar_systemd_snapshot().ok_or_else(|| {
-            RepositoryError::Storage(
-                "non-jar rollback snapshot persistence is reserved for phase 9".into(),
-            )
-        })?;
+        let legacy = legacy_reference_projection(reference);
         let now = now_unix_ms();
         transaction
             .execute(
@@ -139,11 +135,11 @@ impl RollbackRepository for SqliteRollbackRepository {
                     reference.application().as_str(),
                     reference.environment().as_str(),
                     reference.target(),
-                    snapshot.backup_path(),
-                    snapshot.install_path(),
-                    snapshot.rollback_task(),
-                    snapshot.restart_task(),
-                    snapshot.health_check_task(),
+                    legacy.backup_path,
+                    legacy.install_path,
+                    legacy.rollback_task,
+                    legacy.restart_task,
+                    legacy.health_check_task,
                     now,
                 ],
             )
@@ -454,6 +450,33 @@ fn ensure_source_is_latest(
         ))
     } else {
         Ok(())
+    }
+}
+
+struct LegacyReferenceProjection<'a> {
+    backup_path: &'a str,
+    install_path: &'a str,
+    rollback_task: &'a str,
+    restart_task: &'a str,
+    health_check_task: &'a str,
+}
+
+fn legacy_reference_projection(reference: &RollbackReference) -> LegacyReferenceProjection<'_> {
+    match reference.mechanism_snapshot() {
+        RollbackMechanismSnapshot::JarSystemd(snapshot) => LegacyReferenceProjection {
+            backup_path: snapshot.backup_path(),
+            install_path: snapshot.install_path(),
+            rollback_task: snapshot.rollback_task(),
+            restart_task: snapshot.restart_task(),
+            health_check_task: snapshot.health_check_task(),
+        },
+        RollbackMechanismSnapshot::DockerCompose(snapshot) => LegacyReferenceProjection {
+            backup_path: "",
+            install_path: "",
+            rollback_task: snapshot.rollback_task(),
+            restart_task: snapshot.activate_task(),
+            health_check_task: snapshot.health_check_task(),
+        },
     }
 }
 

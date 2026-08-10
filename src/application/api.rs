@@ -3,11 +3,11 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use super::{
-    DeployRequest, DeployService, DeploymentLockManager, DeploymentMechanismPort,
-    DeploymentOutcome, JarSystemdMechanism, RollbackOutcome, RollbackRequest, RollbackService,
+    ContainerDeployRequest, DeployRequest, DeployService, DeploymentLockManager, DeploymentOutcome,
+    DockerComposeMechanism, JarSystemdMechanism, RollbackOutcome, RollbackRequest, RollbackService,
 };
 use crate::config::{ArtifactType, Config};
-use crate::domain::{Deployment, DeploymentId, DeploymentState};
+use crate::domain::{Deployment, DeploymentId, DeploymentMechanismKind, DeploymentState};
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::ports::{
     AuditEvent, AuditRepository, DeploymentRepository, DeploymentTransition, RemoteExecutionPort,
@@ -43,6 +43,10 @@ pub trait DeploymentApi: Send + Sync {
         &self,
         request: DeployRequest,
     ) -> AppResult<DeploymentExecutionResult>;
+    async fn deploy_container_application(
+        &self,
+        request: ContainerDeployRequest,
+    ) -> AppResult<DeploymentExecutionResult>;
     fn get_deployment(&self, deployment_id: &str) -> AppResult<DeploymentDetails>;
     fn list_deployments(
         &self,
@@ -64,9 +68,8 @@ where
     D: DeploymentRepository + Send,
 {
     config: Arc<Config>,
-    mechanism: Arc<JarSystemdMechanism<R>>,
-    deploy: DeployService<JarSystemdMechanism<R>, D>,
-    rollback: RollbackService<JarSystemdMechanism<R>, D>,
+    remote: Arc<R>,
+    locks: DeploymentLockManager,
     repository: Arc<Mutex<D>>,
     rollback_repository: Arc<Mutex<Box<dyn RollbackRepository + Send>>>,
     audit_repository: Option<Arc<dyn AuditRepository>>,
@@ -83,26 +86,10 @@ where
         repository: Arc<Mutex<D>>,
         rollback_repository: Arc<Mutex<Box<dyn RollbackRepository + Send>>>,
     ) -> Self {
-        let locks = DeploymentLockManager::default();
-        let mechanism = Arc::new(JarSystemdMechanism::new(remote));
-        let deploy = DeployService::with_mechanism(
-            Arc::clone(&config),
-            Arc::clone(&mechanism),
-            Arc::clone(&repository),
-        )
-        .with_lock_manager(locks.clone());
-        let rollback = RollbackService::with_mechanism(
-            Arc::clone(&config),
-            Arc::clone(&mechanism),
-            Arc::clone(&repository),
-            Arc::clone(&rollback_repository),
-            locks,
-        );
         Self {
             config,
-            mechanism,
-            deploy,
-            rollback,
+            remote,
+            locks: DeploymentLockManager::default(),
             repository,
             rollback_repository,
             audit_repository: None,
@@ -122,6 +109,19 @@ where
             )
         })?;
         operation(&*repository).map_err(repository_error)
+    }
+
+    fn repository_mut<T>(
+        &self,
+        operation: impl FnOnce(&mut D) -> RepositoryResult<T>,
+    ) -> AppResult<T> {
+        let mut repository = self.repository.lock().map_err(|_| {
+            AppError::new(
+                ErrorCode::PersistenceFailed,
+                "deployment repository lock poisoned",
+            )
+        })?;
+        operation(&mut *repository).map_err(repository_error)
     }
 
     fn rollback_repository<T>(
@@ -190,6 +190,27 @@ where
         }
     }
 
+    fn promote_rollback_capture(&self, deployment_id: &DeploymentId) -> AppResult<bool> {
+        if self
+            .rollback_repository(|repository| repository.get_reference(deployment_id))?
+            .is_some()
+        {
+            // Any stale pending capture can be safely removed once explicit rollback
+            // authority is already durable.
+            self.repository_mut(|repository| repository.clear_rollback_capture(deployment_id))?;
+            return Ok(true);
+        }
+
+        let Some(capture) =
+            self.repository(|repository| repository.get_rollback_capture(deployment_id))?
+        else {
+            return Ok(false);
+        };
+        self.rollback_repository(|repository| repository.record_reference(&capture))?;
+        self.repository_mut(|repository| repository.clear_rollback_capture(deployment_id))?;
+        Ok(true)
+    }
+
     fn record_rollback_reference(&self, outcome: &DeploymentOutcome) -> (bool, Option<String>) {
         if !matches!(
             outcome.deployment.state(),
@@ -197,28 +218,35 @@ where
         ) {
             return (false, None);
         }
-        let environment = match self.config.environment(
-            outcome.deployment.application().as_str(),
-            outcome.deployment.environment().as_str(),
-        ) {
-            Ok(environment) => environment,
-            Err(error) => return (false, Some(error.to_string())),
-        };
-        if !self.mechanism.rollback_is_configured(environment) {
-            return (
-                false,
-                Some("rollback_unavailable: no rollback task is configured".to_owned()),
-            );
+
+        if let Some(reference) = &outcome.rollback_reference {
+            if let Err(error) =
+                self.rollback_repository(|repository| repository.record_reference(reference))
+            {
+                // Keep the pending capture when promotion fails so the dynamic
+                // rollback point is not lost.
+                return (false, Some(error.to_string()));
+            }
+            return match self.repository_mut(|repository| {
+                repository.clear_rollback_capture(outcome.deployment.id())
+            }) {
+                Ok(()) => (true, None),
+                Err(error) => (true, Some(error.to_string())),
+            };
         }
-        let reference = match self
-            .mechanism
-            .build_rollback_reference(&outcome.deployment, environment)
-        {
-            Ok(reference) => reference,
-            Err(error) => return (false, Some(error.to_string())),
-        };
-        match self.rollback_repository(|repository| repository.record_reference(&reference)) {
-            Ok(()) => (true, None),
+
+        // This also closes the crash window between persisting SUCCEEDED and
+        // promoting the already-captured rollback point into explicit authority.
+        match self.promote_rollback_capture(outcome.deployment.id()) {
+            Ok(true) => (true, None),
+            Ok(false) if outcome.idempotent_replay => (false, None),
+            Ok(false) => (
+                false,
+                Some(
+                    "rollback_unavailable: no deployment-bound rollback point was captured"
+                        .to_owned(),
+                ),
+            ),
             Err(error) => (false, Some(error.to_string())),
         }
     }
@@ -239,6 +267,7 @@ where
                 display_name: application.display_name.clone(),
                 artifact_type: match application.artifact_type {
                     ArtifactType::Jar => "jar".to_owned(),
+                    ArtifactType::ContainerImage => "container_image".to_owned(),
                 },
                 environments: application.environments.keys().cloned().collect(),
             })
@@ -249,7 +278,33 @@ where
         &self,
         request: DeployRequest,
     ) -> AppResult<DeploymentExecutionResult> {
-        let outcome = self.deploy.deploy(request).await?;
+        let deploy = DeployService::with_mechanism(
+            Arc::clone(&self.config),
+            Arc::new(JarSystemdMechanism::new(Arc::clone(&self.remote))),
+            Arc::clone(&self.repository),
+        )
+        .with_lock_manager(self.locks.clone());
+        let outcome = deploy.deploy(request).await?;
+        let (rollback_reference_available, rollback_reference_error) =
+            self.record_rollback_reference(&outcome);
+        Ok(DeploymentExecutionResult {
+            outcome,
+            rollback_reference_available,
+            rollback_reference_error,
+        })
+    }
+
+    async fn deploy_container_application(
+        &self,
+        request: ContainerDeployRequest,
+    ) -> AppResult<DeploymentExecutionResult> {
+        let deploy = DeployService::with_mechanism(
+            Arc::clone(&self.config),
+            Arc::new(DockerComposeMechanism::new(Arc::clone(&self.remote))),
+            Arc::clone(&self.repository),
+        )
+        .with_lock_manager(self.locks.clone());
+        let outcome = deploy.deploy_container(request).await?;
         let (rollback_reference_available, rollback_reference_error) =
             self.record_rollback_reference(&outcome);
         Ok(DeploymentExecutionResult {
@@ -319,11 +374,56 @@ where
     }
 
     async fn rollback_deployment(&self, deployment_id: &str) -> AppResult<RollbackOutcome> {
-        self.rollback
-            .rollback(RollbackRequest {
-                deployment_id: deployment_id.to_owned(),
-            })
-            .await
+        let id = DeploymentId::new(deployment_id.to_owned()).map_err(|_| {
+            AppError::new(
+                ErrorCode::UnknownDeployment,
+                format!("unknown deployment: {deployment_id}"),
+            )
+        })?;
+        let deployment = self
+            .repository(|repository| repository.get(&id))?
+            .ok_or_else(|| {
+                AppError::new(
+                    ErrorCode::UnknownDeployment,
+                    format!("unknown deployment: {deployment_id}"),
+                )
+            })?;
+        if matches!(
+            deployment.state(),
+            DeploymentState::Succeeded | DeploymentState::RollbackFailed
+        ) {
+            // If the process crashed after terminal deployment persistence but
+            // before rollback-reference promotion, explicit rollback can recover
+            // the pending capture without guessing any remote state.
+            let _ = self.promote_rollback_capture(&id)?;
+        }
+        let request = RollbackRequest {
+            deployment_id: deployment_id.to_owned(),
+        };
+        match deployment.mechanism_kind() {
+            DeploymentMechanismKind::JarSystemd => {
+                RollbackService::with_mechanism(
+                    Arc::clone(&self.config),
+                    Arc::new(JarSystemdMechanism::new(Arc::clone(&self.remote))),
+                    Arc::clone(&self.repository),
+                    Arc::clone(&self.rollback_repository),
+                    self.locks.clone(),
+                )
+                .rollback(request)
+                .await
+            }
+            DeploymentMechanismKind::DockerCompose => {
+                RollbackService::with_mechanism(
+                    Arc::clone(&self.config),
+                    Arc::new(DockerComposeMechanism::new(Arc::clone(&self.remote))),
+                    Arc::clone(&self.repository),
+                    Arc::clone(&self.rollback_repository),
+                    self.locks.clone(),
+                )
+                .rollback(request)
+                .await
+            }
+        }
     }
 }
 

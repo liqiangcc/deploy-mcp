@@ -13,7 +13,7 @@ pub use recovery::{
     RecoveryIncident, RecoverySubjectKind,
 };
 pub use rollback::{
-    JarSystemdRollbackSnapshot, MechanismContractFingerprint, RollbackError,
-    RollbackMechanismSnapshot, RollbackOperation, RollbackOperationId, RollbackOperationState,
-    RollbackReference, RollbackReferenceState,
+    DockerComposeRollbackSnapshot, JarSystemdRollbackSnapshot, MechanismContractFingerprint,
+    RollbackError, RollbackMechanismSnapshot, RollbackOperation, RollbackOperationId,
+    RollbackOperationState, RollbackReference, RollbackReferenceState,
 };

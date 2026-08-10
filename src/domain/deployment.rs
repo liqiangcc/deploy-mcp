@@ -302,8 +302,8 @@ impl Deployment {
         }
     }
 
-    /// Backward-compatible rehydration for pre-v0.2 rows that only contain the
-    /// legacy local-file identity columns.
+    /// Test-only backward-compatible rehydration for the v0.1 local-file model.
+    #[cfg(test)]
     pub(crate) fn rehydrate(
         id: DeploymentId,
         application: ApplicationId,

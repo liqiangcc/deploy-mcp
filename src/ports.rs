@@ -229,6 +229,16 @@ pub trait DeploymentRepository {
         error: Option<&str>,
     ) -> RepositoryResult<()>;
     fn step_attempts(&self, id: &DeploymentId) -> RepositoryResult<Vec<StepAttemptRecord>>;
+    /// Persist the deployment-bound rollback point immediately after capture and
+    /// before the first live mutation. This is not yet an explicit-rollback
+    /// authority; it survives crashes so recovery never has to guess dynamic
+    /// mechanism state such as a previous container digest.
+    fn persist_rollback_capture(&mut self, reference: &RollbackReference) -> RepositoryResult<()>;
+    fn get_rollback_capture(
+        &self,
+        deployment_id: &DeploymentId,
+    ) -> RepositoryResult<Option<RollbackReference>>;
+    fn clear_rollback_capture(&mut self, deployment_id: &DeploymentId) -> RepositoryResult<()>;
 }
 
 pub trait RollbackRepository: Send {

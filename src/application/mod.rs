@@ -17,11 +17,14 @@ pub use api::{
     ApplicationSummary, DeploymentApi, DeploymentApplication, DeploymentDetails,
     DeploymentExecutionResult,
 };
-pub use deploy::{DeployRequest, DeployService, DeploymentFailure, DeploymentOutcome};
+pub use deploy::{
+    ContainerDeployRequest, DeployRequest, DeployService, DeploymentFailure, DeploymentOutcome,
+};
 pub use lock::{DeploymentLease, DeploymentLockManager};
 pub use mechanism::{
-    DeploymentMechanismPort, JarSystemdMechanism, MechanismTaskExecution, RollbackMechanismAction,
-    RollbackPreflightError,
+    DeploymentMechanismPort, DockerComposeMechanism, JarSystemdMechanism,
+    MechanismPrepareExecution, MechanismRollbackCapture, MechanismTaskExecution,
+    RollbackMechanismAction, RollbackPreflightError,
 };
 pub use preflight::{preflight_remote_capabilities, RemotePreflightError, RemotePreflightReport};
 pub use recovery::{

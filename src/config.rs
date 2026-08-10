@@ -101,6 +101,7 @@ pub struct ApplicationConfig {
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactType {
     Jar,
+    ContainerImage,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -108,12 +109,36 @@ pub enum ArtifactType {
 pub struct MechanismConfig {
     #[serde(rename = "type")]
     pub kind: DeploymentMechanismKind,
+    #[serde(default)]
+    pub image_repository: Option<String>,
+    #[serde(default)]
+    pub compose_project: Option<String>,
+    #[serde(default)]
+    pub service: Option<String>,
+    #[serde(default)]
+    pub tasks: Option<DockerComposeTaskReferences>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DockerComposeTaskReferences {
+    pub precheck: Option<String>,
+    pub prepare: String,
+    pub capture_rollback: String,
+    pub apply: String,
+    pub activate: String,
+    pub health_check: String,
+    pub rollback: String,
 }
 
 impl Default for MechanismConfig {
     fn default() -> Self {
         Self {
             kind: DeploymentMechanismKind::JarSystemd,
+            image_repository: None,
+            compose_project: None,
+            service: None,
+            tasks: None,
         }
     }
 }
@@ -124,19 +149,27 @@ pub struct EnvironmentConfig {
     #[serde(default)]
     pub mechanism: MechanismConfig,
     pub target: String,
+    #[serde(default)]
     pub staging_path: String,
+    #[serde(default)]
     pub install_path: String,
+    #[serde(default)]
     pub backup_path: String,
+    #[serde(default)]
     pub tasks: TaskReferences,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskReferences {
     pub precheck: Option<String>,
+    #[serde(default)]
     pub backup: String,
+    #[serde(default)]
     pub install: String,
+    #[serde(default)]
     pub restart: String,
+    #[serde(default)]
     pub health_check: String,
     pub rollback: Option<String>,
 }
@@ -199,28 +232,100 @@ impl Config {
 
             for (environment_id, environment) in &application.environments {
                 validate_reference("environment id", environment_id)?;
-                if environment.mechanism.kind != DeploymentMechanismKind::JarSystemd {
-                    return Err(AppError::invalid_configuration(format!(
-                        "deployment mechanism {} is not implemented in phase 8",
-                        environment.mechanism.kind.as_str()
-                    )));
-                }
                 validate_reference("target", &environment.target)?;
-                validate_absolute_path("staging_path", &environment.staging_path)?;
-                validate_absolute_path("install_path", &environment.install_path)?;
-                validate_absolute_path("backup_path", &environment.backup_path)?;
-                validate_optional_reference(
-                    "precheck task",
-                    environment.tasks.precheck.as_deref(),
-                )?;
-                validate_reference("backup task", &environment.tasks.backup)?;
-                validate_reference("install task", &environment.tasks.install)?;
-                validate_reference("restart task", &environment.tasks.restart)?;
-                validate_reference("health_check task", &environment.tasks.health_check)?;
-                validate_optional_reference(
-                    "rollback task",
-                    environment.tasks.rollback.as_deref(),
-                )?;
+                match environment.mechanism.kind {
+                    DeploymentMechanismKind::JarSystemd => {
+                        if application.artifact_type != ArtifactType::Jar {
+                            return Err(AppError::invalid_configuration(format!(
+                                "application {application_id} must use artifact_type jar for jar_systemd"
+                            )));
+                        }
+                        if environment.mechanism.image_repository.is_some()
+                            || environment.mechanism.compose_project.is_some()
+                            || environment.mechanism.service.is_some()
+                            || environment.mechanism.tasks.is_some()
+                        {
+                            return Err(AppError::invalid_configuration(
+                                "jar_systemd environment must not define docker_compose mechanism fields",
+                            ));
+                        }
+                        validate_absolute_path("staging_path", &environment.staging_path)?;
+                        validate_absolute_path("install_path", &environment.install_path)?;
+                        validate_absolute_path("backup_path", &environment.backup_path)?;
+                        validate_optional_reference(
+                            "precheck task",
+                            environment.tasks.precheck.as_deref(),
+                        )?;
+                        validate_reference("backup task", &environment.tasks.backup)?;
+                        validate_reference("install task", &environment.tasks.install)?;
+                        validate_reference("restart task", &environment.tasks.restart)?;
+                        validate_reference("health_check task", &environment.tasks.health_check)?;
+                        validate_optional_reference(
+                            "rollback task",
+                            environment.tasks.rollback.as_deref(),
+                        )?;
+                    }
+                    DeploymentMechanismKind::DockerCompose => {
+                        if application.artifact_type != ArtifactType::ContainerImage {
+                            return Err(AppError::invalid_configuration(format!(
+                                "application {application_id} must use artifact_type container_image for docker_compose"
+                            )));
+                        }
+                        if !environment.staging_path.is_empty()
+                            || !environment.install_path.is_empty()
+                            || !environment.backup_path.is_empty()
+                            || environment.tasks.precheck.is_some()
+                            || !environment.tasks.backup.is_empty()
+                            || !environment.tasks.install.is_empty()
+                            || !environment.tasks.restart.is_empty()
+                            || !environment.tasks.health_check.is_empty()
+                            || environment.tasks.rollback.is_some()
+                        {
+                            return Err(AppError::invalid_configuration(
+                                "docker_compose environment must not define jar_systemd paths or tasks",
+                            ));
+                        }
+                        validate_reference(
+                            "docker image_repository",
+                            required_option(
+                                "docker image_repository",
+                                environment.mechanism.image_repository.as_deref(),
+                            )?,
+                        )?;
+                        validate_reference(
+                            "docker compose_project",
+                            required_option(
+                                "docker compose_project",
+                                environment.mechanism.compose_project.as_deref(),
+                            )?,
+                        )?;
+                        validate_reference(
+                            "docker service",
+                            required_option(
+                                "docker service",
+                                environment.mechanism.service.as_deref(),
+                            )?,
+                        )?;
+                        let tasks = environment.mechanism.tasks.as_ref().ok_or_else(|| {
+                            AppError::invalid_configuration(
+                                "docker_compose mechanism must define trusted tasks",
+                            )
+                        })?;
+                        validate_optional_reference(
+                            "docker precheck task",
+                            tasks.precheck.as_deref(),
+                        )?;
+                        validate_reference("docker prepare task", &tasks.prepare)?;
+                        validate_reference(
+                            "docker capture_rollback task",
+                            &tasks.capture_rollback,
+                        )?;
+                        validate_reference("docker apply task", &tasks.apply)?;
+                        validate_reference("docker activate task", &tasks.activate)?;
+                        validate_reference("docker health_check task", &tasks.health_check)?;
+                        validate_reference("docker rollback task", &tasks.rollback)?;
+                    }
+                }
             }
         }
 
@@ -251,6 +356,10 @@ impl Config {
                 )
             })
     }
+}
+
+fn required_option<'a>(kind: &str, value: Option<&'a str>) -> AppResult<&'a str> {
+    value.ok_or_else(|| AppError::invalid_configuration(format!("{kind} must be configured")))
 }
 
 fn validate_reference(kind: &str, value: &str) -> AppResult<()> {
@@ -478,15 +587,57 @@ applications:
     }
 
     #[test]
-    fn rejects_unimplemented_mechanism_before_remote_work() {
-        let raw = VALID_CONFIG.replace(
-            "        target: test-server",
-            "        mechanism:\n          type: docker_compose\n        target: test-server",
+    fn parses_trusted_docker_compose_mechanism() {
+        let raw = r#"
+remote_exec:
+  command: remote-exec-mcp
+applications:
+  demo-service:
+    artifact_type: container_image
+    environments:
+      test:
+        target: test-server
+        mechanism:
+          type: docker_compose
+          image_repository: registry.example.com/demo-service
+          compose_project: demo
+          service: app
+          tasks:
+            precheck: demo-compose-precheck
+            prepare: demo-compose-prepare
+            capture_rollback: demo-compose-current
+            apply: demo-compose-apply
+            activate: demo-compose-up
+            health_check: demo-compose-health
+            rollback: demo-compose-rollback
+"#;
+        let config = Config::from_yaml(raw).unwrap();
+        let environment = config.environment("demo-service", "test").unwrap();
+        assert_eq!(
+            environment.mechanism.kind,
+            DeploymentMechanismKind::DockerCompose
         );
+        assert_eq!(
+            environment.mechanism.image_repository.as_deref(),
+            Some("registry.example.com/demo-service")
+        );
+        assert_eq!(
+            config.application("demo-service").unwrap().artifact_type,
+            ArtifactType::ContainerImage
+        );
+    }
+
+    #[test]
+    fn docker_compose_rejects_jar_specific_authority() {
+        let raw = VALID_CONFIG
+            .replace("artifact_type: jar", "artifact_type: container_image")
+            .replace(
+                "        target: test-server",
+                "        mechanism:\n          type: docker_compose\n          image_repository: registry.example.com/demo-service\n          compose_project: demo\n          service: app\n          tasks:\n            prepare: demo-compose-prepare\n            capture_rollback: demo-compose-current\n            apply: demo-compose-apply\n            activate: demo-compose-up\n            health_check: demo-compose-health\n            rollback: demo-compose-rollback\n        target: test-server",
+            );
         let error = Config::from_yaml(&raw).unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidConfiguration);
-        assert!(error.message.contains("docker_compose"));
-        assert!(error.message.contains("not implemented in phase 8"));
+        assert!(error.message.contains("must not define jar_systemd"));
     }
 
     #[test]
