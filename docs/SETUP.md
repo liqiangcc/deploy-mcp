@@ -28,7 +28,7 @@ Do not expose an unrestricted shell to `deploy-mcp`. The deployment adapter inte
 Build `remote-exec-mcp` from its repository and `deploy-mcp` from this repository:
 
 ```bash
-cargo build --release
+cargo build --locked --release
 ```
 
 The deploy binaries are produced under `target/release/`:
