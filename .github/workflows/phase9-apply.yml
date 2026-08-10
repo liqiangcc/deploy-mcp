@@ -18,9 +18,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - uses: dtolnay/rust-toolchain@stable
-
       - name: Reconstruct and apply exact implementation patch
         run: |
           set -euo pipefail
@@ -28,25 +26,19 @@ jobs:
           git apply --check /tmp/phase9.patch
           git apply /tmp/phase9.patch
           git diff --check
-
       - name: Format
         run: cargo fmt --all
-
       - name: Check formatting
         run: cargo fmt --all -- --check
-
       - name: Clippy locked
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
-
       - name: Test locked
         run: cargo test --locked --all-features
-
       - name: Remove temporary implementation helpers
         run: |
           rm -f .phase9/phase9.patch.gz.b64
           rm -f .github/workflows/phase9-source-export.yml
           rm -f .github/workflows/phase9-apply.yml
-
       - name: Stage only confirmed Phase 9 paths
         run: |
           set -euo pipefail
@@ -65,26 +57,22 @@ jobs:
             .github/workflows/phase9-source-export.yml \
             .github/workflows/phase9-apply.yml
           git diff --cached --check
-          expected=$(cat <<'EOF'
-.github/workflows/phase9-apply.yml
-.github/workflows/phase9-source-export.yml
-.phase9/phase9.patch.gz.b64
-src/application/api.rs
-src/application/deploy.rs
-src/application/mechanism.rs
-src/application/mod.rs
-src/config.rs
-src/domain/mod.rs
-src/domain/rollback.rs
-src/mcp.rs
-src/persistence.rs
-src/rollback_persistence.rs
-EOF
-          )
           actual=$(git diff --cached --name-only | sort)
-          expected_sorted=$(printf '%s\n' "$expected" | sort)
-          test "$actual" = "$expected_sorted"
-
+          expected=$(printf '%s\n' \
+            '.github/workflows/phase9-apply.yml' \
+            '.github/workflows/phase9-source-export.yml' \
+            '.phase9/phase9.patch.gz.b64' \
+            'src/application/api.rs' \
+            'src/application/deploy.rs' \
+            'src/application/mechanism.rs' \
+            'src/application/mod.rs' \
+            'src/config.rs' \
+            'src/domain/mod.rs' \
+            'src/domain/rollback.rs' \
+            'src/mcp.rs' \
+            'src/persistence.rs' \
+            'src/rollback_persistence.rs' | sort)
+          test "$actual" = "$expected"
       - name: Commit and push validated implementation
         run: |
           git config user.name "github-actions[bot]"
