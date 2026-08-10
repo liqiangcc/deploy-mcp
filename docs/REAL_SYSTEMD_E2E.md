@@ -26,10 +26,10 @@ The workflow deliberately keeps responsibilities separated:
 The workflow checks out `liqiangcc/remote-exec-mcp` at:
 
 ```text
-d2550b7d69682927be4c0d2077293e8b9df7f4e4
+92da5d6ba86e0c095478d36a1092e321e29bfb9c
 ```
 
-The commit is pinned so a deploy-mcp acceptance result refers to an exact remote-exec implementation. Updating that pin is an explicit compatibility change and should be reviewed with the E2E result.
+The commit is pinned so a deploy-mcp acceptance result refers to an exact remote-exec implementation and its committed Cargo dependency graph. Updating that pin is an explicit compatibility change and should be reviewed with the E2E result. The workflow builds the pinned remote with `cargo build --locked --release` so CI cannot silently re-resolve its transitive dependencies.
 
 ## Disposable target
 

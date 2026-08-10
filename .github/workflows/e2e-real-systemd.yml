@@ -40,7 +40,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: liqiangcc/remote-exec-mcp
-          ref: d2550b7d69682927be4c0d2077293e8b9df7f4e4
+          ref: 92da5d6ba86e0c095478d36a1092e321e29bfb9c
           path: remote-exec-mcp
           persist-credentials: false
 
@@ -59,7 +59,7 @@ jobs:
           sudo apt-get install -y openssh-server
 
       - name: Build pinned remote-exec-mcp
-        run: cargo build --release --manifest-path remote-exec-mcp/Cargo.toml
+        run: cargo build --locked --release --manifest-path remote-exec-mcp/Cargo.toml
 
       - name: Build deploy-mcp
         run: cargo build --locked --bin deploy-mcp
