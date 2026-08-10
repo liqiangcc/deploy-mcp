@@ -1,0 +1,93 @@
+name: Phase 9 Apply And Validate
+
+on:
+  push:
+    branches:
+      - feat/v0.2-docker-compose-mechanism
+    paths:
+      - .phase9/phase9.patch.gz.b64
+      - .github/workflows/phase9-apply.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Reconstruct and apply exact implementation patch
+        run: |
+          set -euo pipefail
+          base64 -d .phase9/phase9.patch.gz.b64 | gzip -d > /tmp/phase9.patch
+          git apply --check /tmp/phase9.patch
+          git apply /tmp/phase9.patch
+          git diff --check
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy locked
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Test locked
+        run: cargo test --locked --all-features
+
+      - name: Remove temporary implementation helpers
+        run: |
+          rm -f .phase9/phase9.patch.gz.b64
+          rm -f .github/workflows/phase9-source-export.yml
+          rm -f .github/workflows/phase9-apply.yml
+
+      - name: Stage only confirmed Phase 9 paths
+        run: |
+          set -euo pipefail
+          git add -- \
+            src/application/api.rs \
+            src/application/deploy.rs \
+            src/application/mechanism.rs \
+            src/application/mod.rs \
+            src/config.rs \
+            src/domain/mod.rs \
+            src/domain/rollback.rs \
+            src/mcp.rs \
+            src/persistence.rs \
+            src/rollback_persistence.rs \
+            .phase9/phase9.patch.gz.b64 \
+            .github/workflows/phase9-source-export.yml \
+            .github/workflows/phase9-apply.yml
+          git diff --cached --check
+          expected=$(cat <<'EOF'
+.github/workflows/phase9-apply.yml
+.github/workflows/phase9-source-export.yml
+.phase9/phase9.patch.gz.b64
+src/application/api.rs
+src/application/deploy.rs
+src/application/mechanism.rs
+src/application/mod.rs
+src/config.rs
+src/domain/mod.rs
+src/domain/rollback.rs
+src/mcp.rs
+src/persistence.rs
+src/rollback_persistence.rs
+EOF
+          )
+          actual=$(git diff --cached --name-only | sort)
+          expected_sorted=$(printf '%s\n' "$expected" | sort)
+          test "$actual" = "$expected_sorted"
+
+      - name: Commit and push validated implementation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "feat: add docker compose deployment mechanism"
+          git push origin HEAD:feat/v0.2-docker-compose-mechanism
