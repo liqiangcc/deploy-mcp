@@ -91,7 +91,21 @@ jobs:
       - name: Diagnostics on failure
         if: failure()
         run: |
-          docker ps -a || true
-          sudo systemctl status deploy-mcp-e2e.service --no-pager || true
-          if [[ -n "${DEPLOY_MCP_E2E_WORK_ROOT:-}" ]]; then test ! -f "$DEPLOY_MCP_E2E_WORK_ROOT/sshd.log" || cat "$DEPLOY_MCP_E2E_WORK_ROOT/sshd.log"; fi
-          if [[ -n "${DEPLOY_MCP_DOCKER_E2E_WORK_ROOT:-}" ]]; then test ! -f "$DEPLOY_MCP_DOCKER_E2E_WORK_ROOT/sshd.log" || cat "$DEPLOY_MCP_DOCKER_E2E_WORK_ROOT/sshd.log"; fi
+          set +e
+          echo '=== docker ps ==='
+          docker ps -a
+          echo '=== current Compose env ==='
+          cat /home/deploy/docker/.env 2>/dev/null
+          echo '=== running version ==='
+          cat /home/deploy/docker/state/running-version 2>/dev/null
+          echo '=== compose ps ==='
+          docker compose -p deploy-mcp-e2e -f /home/deploy/docker/compose.yml --env-file /home/deploy/docker/.env ps
+          echo '=== compose logs ==='
+          docker compose -p deploy-mcp-e2e -f /home/deploy/docker/compose.yml --env-file /home/deploy/docker/.env logs --no-color
+          echo '=== Docker remote-exec audit ==='
+          if [[ -n "${DEPLOY_MCP_DOCKER_E2E_REMOTE_EXEC_AUDIT:-}" ]]; then cat "$DEPLOY_MCP_DOCKER_E2E_REMOTE_EXEC_AUDIT"; fi
+          echo '=== Docker sshd ==='
+          if [[ -n "${DEPLOY_MCP_DOCKER_E2E_WORK_ROOT:-}" ]]; then cat "$DEPLOY_MCP_DOCKER_E2E_WORK_ROOT/sshd.log" 2>/dev/null; fi
+          echo '=== systemd service ==='
+          sudo systemctl status deploy-mcp-e2e.service --no-pager
+          exit 0
