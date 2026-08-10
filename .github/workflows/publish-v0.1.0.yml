@@ -1,0 +1,96 @@
+name: Publish v0.1.0
+
+"on":
+  push:
+    branches:
+      - release/v0.1.0-publish
+    paths:
+      - .github/workflows/publish-v0.1.0.yml
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish v0.1.0 from locked release candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: 035eabf3924f091999bcc8be9055708c4ad3d409
+        run: |
+          set -euo pipefail
+
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v0.1.0" >/dev/null 2>&1; then
+            echo "v0.1.0 tag already exists; refusing to overwrite"
+            exit 1
+          fi
+
+          if gh release view v0.1.0 --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "v0.1.0 release already exists; refusing to overwrite"
+            exit 1
+          fi
+
+          cat > release-notes.md <<'EOF'
+          First production-shaped release of `deploy-mcp`, a deterministic deployment-orchestration MCP designed to compose with `remote-exec-mcp` rather than exposing SSH, SFTP, credentials, or arbitrary shell execution directly.
+
+          ## Highlights
+
+          - Deterministic Java JAR / Linux systemd deployment workflow
+          - Staged artifact upload, backup, installation, restart, and bounded health verification
+          - Automatic rollback for eligible post-mutation failures
+          - Explicit deployment-bound rollback
+          - Durable SQLite deployment, rollback, recovery, and structured history
+          - Idempotent deployment requests and same-version artifact identity protection
+          - Fail-closed timeout and crash ambiguity handling
+          - Startup recovery and operator reconciliation
+          - Canonical local artifact allowlisting
+          - Narrow `RemoteExecutionPort` boundary backed by `remote-exec-mcp`
+          - AI-facing diagnostic redaction and structured audit filtering
+
+          ## Validation
+
+          The release is covered by:
+
+          - `cargo fmt --all -- --check`
+          - `cargo clippy --locked --all-targets --all-features -- -D warnings`
+          - `cargo test --locked --all-features`
+          - production-shaped end-to-end acceptance through `deploy-mcp -> remote-exec-mcp -> SSH/SFTP -> systemd -> Java JAR`
+          - verified deployment of a new JAR followed by explicit rollback to the previous version
+
+          The real-systemd acceptance test pins `remote-exec-mcp` to commit `92da5d6ba86e0c095478d36a1092e321e29bfb9c` and builds it using its committed dependency graph with Cargo `--locked`.
+
+          ## v0.1 Scope
+
+          Supported:
+
+          - Java / Spring Boot JAR artifacts
+          - Linux remote hosts
+          - systemd-managed services
+          - deterministic deployment and rollback through configured named remote capabilities
+
+          Not included in v0.1:
+
+          - Docker
+          - Kubernetes
+          - Helm
+          - build pipelines
+          - log querying
+          - configuration management
+          - arbitrary remote shell execution
+          EOF
+
+          gh release create v0.1.0 \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${TARGET_SHA}" \
+            --title "deploy-mcp v0.1.0" \
+            --notes-file release-notes.md
+
+          TAG_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v0.1.0" --jq '.object.sha')"
+          test "${TAG_SHA}" = "${TARGET_SHA}"
+
+          gh release view v0.1.0 \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json tagName,isDraft,isPrerelease,url \
+            --jq '{tagName,isDraft,isPrerelease,url}'
