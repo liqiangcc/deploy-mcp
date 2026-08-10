@@ -1,0 +1,63 @@
+name: Phase 8 Apply and Validate
+
+on:
+  push:
+    branches:
+      - feat/v0.2-deployment-mechanism-port
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Apply deterministic mechanism extraction
+        run: python3 scripts/phase8_apply.py
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --all-features
+
+      - name: Remove temporary helpers
+        run: |
+          rm -f .github/workflows/phase8-source-export.yml
+          rm -f .github/workflows/phase8-apply.yml
+          rm -f scripts/phase8_apply.py
+
+      - name: Verify and commit exact scope
+        run: |
+          git diff --check
+          git add -- \
+            src/application/api.rs \
+            src/application/deploy.rs \
+            src/application/mechanism.rs \
+            src/application/mod.rs \
+            src/application/rollback.rs \
+            .github/workflows/phase8-source-export.yml \
+            .github/workflows/phase8-apply.yml \
+            scripts/phase8_apply.py
+          git diff --cached --check
+          echo 'Staged paths:'
+          git diff --cached --name-only
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'refactor: extract jar systemd deployment mechanism'
+          git push origin HEAD:${GITHUB_REF_NAME}
