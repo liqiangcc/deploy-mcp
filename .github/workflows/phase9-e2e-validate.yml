@@ -88,24 +88,25 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "test: cover docker compose deployment mechanism"
           git push origin HEAD:feat/v0.2-docker-compose-mechanism
-      - name: Diagnostics on failure
+      - name: Collect diagnostics on failure
         if: failure()
         run: |
           set +e
-          echo '=== docker ps ==='
-          docker ps -a
-          echo '=== current Compose env ==='
-          cat /home/deploy/docker/.env 2>/dev/null
-          echo '=== running version ==='
-          cat /home/deploy/docker/state/running-version 2>/dev/null
-          echo '=== compose ps ==='
-          docker compose -p deploy-mcp-e2e -f /home/deploy/docker/compose.yml --env-file /home/deploy/docker/.env ps
-          echo '=== compose logs ==='
-          docker compose -p deploy-mcp-e2e -f /home/deploy/docker/compose.yml --env-file /home/deploy/docker/.env logs --no-color
-          echo '=== Docker remote-exec audit ==='
-          if [[ -n "${DEPLOY_MCP_DOCKER_E2E_REMOTE_EXEC_AUDIT:-}" ]]; then cat "$DEPLOY_MCP_DOCKER_E2E_REMOTE_EXEC_AUDIT"; fi
-          echo '=== Docker sshd ==='
-          if [[ -n "${DEPLOY_MCP_DOCKER_E2E_WORK_ROOT:-}" ]]; then cat "$DEPLOY_MCP_DOCKER_E2E_WORK_ROOT/sshd.log" 2>/dev/null; fi
-          echo '=== systemd service ==='
-          sudo systemctl status deploy-mcp-e2e.service --no-pager
+          out="$RUNNER_TEMP/phase9-docker-diagnostics"
+          mkdir -p "$out"
+          docker ps -a > "$out/docker-ps.txt" 2>&1
+          cat /home/deploy/docker/.env > "$out/compose-env.txt" 2>&1
+          cat /home/deploy/docker/state/running-version > "$out/running-version.txt" 2>&1
+          docker compose -p deploy-mcp-e2e -f /home/deploy/docker/compose.yml --env-file /home/deploy/docker/.env ps > "$out/compose-ps.txt" 2>&1
+          docker compose -p deploy-mcp-e2e -f /home/deploy/docker/compose.yml --env-file /home/deploy/docker/.env logs --no-color > "$out/compose-logs.txt" 2>&1
+          if [[ -n "${DEPLOY_MCP_DOCKER_E2E_REMOTE_EXEC_AUDIT:-}" ]]; then cp "$DEPLOY_MCP_DOCKER_E2E_REMOTE_EXEC_AUDIT" "$out/remote-exec-audit.jsonl"; fi
+          if [[ -n "${DEPLOY_MCP_DOCKER_E2E_WORK_ROOT:-}" ]]; then cp "$DEPLOY_MCP_DOCKER_E2E_WORK_ROOT/sshd.log" "$out/docker-sshd.log" 2>/dev/null; fi
+          sudo systemctl status deploy-mcp-e2e.service --no-pager > "$out/systemd-status.txt" 2>&1
           exit 0
+      - name: Upload Docker diagnostics artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase9-docker-diagnostics
+          path: ${{ runner.temp }}/phase9-docker-diagnostics
+          retention-days: 1
