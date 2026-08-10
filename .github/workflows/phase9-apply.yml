@@ -18,12 +18,15 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - name: Reconstruct and apply exact implementation patch
+      - name: Reconstruct and apply Phase 9 implementation
         run: |
           set -euo pipefail
           cat .phase9/part01.txt .phase9/part02.txt .phase9/part03.txt .phase9/part04.txt .phase9/part05.txt .phase9/part06.txt .phase9/part07.txt | base64 -d | gzip -d > /tmp/phase9.patch
           git apply --check /tmp/phase9.patch
           git apply /tmp/phase9.patch
+          cat .phase9/delta01.txt .phase9/delta02.txt .phase9/delta03.txt | base64 -d | gzip -d > /tmp/phase9-delta.patch
+          git apply --check /tmp/phase9-delta.patch
+          git apply /tmp/phase9-delta.patch
           git diff --check
       - name: Format
         run: cargo fmt --all
@@ -42,6 +45,7 @@ jobs:
         run: |
           set -euo pipefail
           git add -- \
+            migrations/007_deployment_rollback_capture.sql \
             src/application/api.rs \
             src/application/deploy.rs \
             src/application/mechanism.rs \
@@ -51,15 +55,13 @@ jobs:
             src/domain/rollback.rs \
             src/mcp.rs \
             src/persistence.rs \
+            src/ports.rs \
+            src/recovery_persistence.rs \
             src/rollback_persistence.rs \
             .phase9/phase9.patch.gz.b64 \
-            .phase9/part01.txt \
-            .phase9/part02.txt \
-            .phase9/part03.txt \
-            .phase9/part04.txt \
-            .phase9/part05.txt \
-            .phase9/part06.txt \
-            .phase9/part07.txt \
+            .phase9/part01.txt .phase9/part02.txt .phase9/part03.txt .phase9/part04.txt \
+            .phase9/part05.txt .phase9/part06.txt .phase9/part07.txt \
+            .phase9/delta01.txt .phase9/delta02.txt .phase9/delta03.txt \
             .github/workflows/phase9-source-export.yml \
             .github/workflows/phase9-apply.yml
           git diff --cached --check
@@ -67,23 +69,14 @@ jobs:
           expected=$(printf '%s\n' \
             '.github/workflows/phase9-apply.yml' \
             '.github/workflows/phase9-source-export.yml' \
+            '.phase9/delta01.txt' '.phase9/delta02.txt' '.phase9/delta03.txt' \
             '.phase9/phase9.patch.gz.b64' \
-            '.phase9/part01.txt' \
-            '.phase9/part02.txt' \
-            '.phase9/part03.txt' \
-            '.phase9/part04.txt' \
-            '.phase9/part05.txt' \
-            '.phase9/part06.txt' \
-            '.phase9/part07.txt' \
-            'src/application/api.rs' \
-            'src/application/deploy.rs' \
-            'src/application/mechanism.rs' \
-            'src/application/mod.rs' \
-            'src/config.rs' \
-            'src/domain/mod.rs' \
-            'src/domain/rollback.rs' \
-            'src/mcp.rs' \
-            'src/persistence.rs' \
+            '.phase9/part01.txt' '.phase9/part02.txt' '.phase9/part03.txt' '.phase9/part04.txt' \
+            '.phase9/part05.txt' '.phase9/part06.txt' '.phase9/part07.txt' \
+            'migrations/007_deployment_rollback_capture.sql' \
+            'src/application/api.rs' 'src/application/deploy.rs' 'src/application/mechanism.rs' \
+            'src/application/mod.rs' 'src/config.rs' 'src/domain/mod.rs' 'src/domain/rollback.rs' \
+            'src/mcp.rs' 'src/persistence.rs' 'src/ports.rs' 'src/recovery_persistence.rs' \
             'src/rollback_persistence.rs' | sort)
           test "$actual" = "$expected"
       - name: Commit and push validated implementation
