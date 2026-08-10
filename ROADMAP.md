@@ -294,11 +294,66 @@ Operator reconciliation acceptance criteria:
 
 v0.1 is complete when a Java JAR can be deployed to one configured Linux/systemd environment through `remote-exec-mcp`, with durable state, deterministic verification, automatic rollback, safe deployment-bound explicit rollback, fail-closed crash recovery, controlled operator reconciliation, deployment history, and no unrestricted remote execution surface in deploy-mcp.
 
-## Post-v0.1 candidates
+## Phase 8 — v0.2 deployment-mechanism architecture
 
-Do not start these until the generic deployment lifecycle has proven stable:
+- [ ] define `DeploymentMechanismPort`
+- [ ] introduce generic lifecycle operation vocabulary without breaking v0.1 durable state compatibility
+- [ ] introduce generic release identity for local-file and immutable-container releases
+- [ ] generalize rollback capability snapshots with mechanism kind + contract fingerprint
+- [ ] move the existing JAR/systemd workflow behind `JarSystemdMechanism`
+- [ ] preserve the existing MCP JAR request contract during migration
+- [ ] preserve idempotency, timeout, recovery, audit, mutation-guard, and rollback semantics
+- [ ] add architecture regression tests proving mechanism selection remains trusted configuration
+- [ ] re-run the real remote-exec + systemd E2E after extraction
 
-- Docker/Compose deployment adapter;
+Acceptance criteria:
+
+- deployment lifecycle/state/persistence remains application-owned;
+- mechanism adapters cannot transition durable state or bypass recovery/mutation guards;
+- `JarSystemdMechanism` composes `RemoteExecutionPort` rather than SSH/SFTP directly;
+- the existing v0.1 JAR deployment and rollback behavior is unchanged;
+- no MCP tool accepts a mechanism, target, task, remote path, command, argv, or credential;
+- future mechanisms can be introduced without mechanism-specific branches throughout the deployment domain.
+
+## Phase 9 — v0.2 single-host Docker Compose mechanism
+
+- [ ] add trusted `docker_compose` environment configuration
+- [ ] support configured image repository + immutable image digest release identity
+- [ ] implement Docker Compose precheck/prepare/apply/activate/verify through approved remote-exec named tasks
+- [ ] capture a deployment-bound previous-image rollback point
+- [ ] support automatic rollback after eligible post-mutation failures
+- [ ] support explicit rollback through the existing deployment-bound rollback API
+- [ ] preserve timeout/crash ambiguity and startup-recovery semantics
+- [ ] extend structured history with mechanism identity without exposing task/command internals
+- [ ] add Docker-specific threat-model regression tests
+- [ ] add real remote-exec + SSH + Docker Compose deploy/rollback E2E
+
+Docker Compose v0.2 scope:
+
+- one configured Linux target;
+- one configured Compose project;
+- one managed service;
+- one configured image repository;
+- immutable image digest;
+- deterministic health verification;
+- previous-release rollback.
+
+Explicitly deferred:
+
+- Kubernetes / Helm;
+- Docker Swarm;
+- multi-host rolling deployment;
+- blue/green / canary / traffic shifting;
+- registry credential management;
+- database migration orchestration;
+- arbitrary Docker/Compose commands.
+
+## v0.2 completion boundary
+
+v0.2 is complete when the existing JAR/systemd mechanism and a new single-host Docker Compose mechanism both execute through the same application-owned deployment lifecycle, while retaining durable state, idempotency, fail-closed timeout/recovery, deterministic verification, deployment-bound rollback, structured audit/history, and the existing no-raw-execution security boundary.
+
+## Post-v0.2 candidates
+
 - Kubernetes native API adapter;
 - Helm workflow;
 - multi-host rolling deployment;
