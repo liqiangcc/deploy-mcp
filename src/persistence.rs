@@ -10,8 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{params, Connection, ErrorCode, OptionalExtension, TransactionBehavior};
 
 use crate::domain::{
-    ApplicationId, Artifact, Deployment, DeploymentId, DeploymentState, DeploymentStep,
-    EnvironmentId,
+    ApplicationId, Artifact, Deployment, DeploymentId, DeploymentMechanismKind, DeploymentState,
+    DeploymentStep, EnvironmentId, ReleaseIdentity,
 };
 use crate::ports::{
     DeploymentRepository, DeploymentReservation, DeploymentTransition, RepositoryError,
@@ -20,8 +20,19 @@ use crate::ports::{
 
 const INITIAL_MIGRATION: &str = include_str!("../migrations/001_initial.sql");
 const IDENTITY_MIGRATION: &str = include_str!("../migrations/004_deployment_identity.sql");
+const GENERIC_MODEL_MIGRATION: &str = include_str!("../migrations/006_v0_2_generic_model.sql");
 
-type DeploymentRow = (String, String, String, String, i64, String, String);
+type DeploymentRow = (
+    String,
+    String,
+    String,
+    String,
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+);
 
 pub struct SqliteDeploymentRepository {
     connection: Connection,
@@ -45,18 +56,23 @@ impl SqliteDeploymentRepository {
         connection
             .execute_batch(IDENTITY_MIGRATION)
             .map_err(storage_error)?;
+        connection
+            .execute_batch(GENERIC_MODEL_MIGRATION)
+            .map_err(storage_error)?;
         Ok(Self { connection })
     }
 }
 
 impl DeploymentRepository for SqliteDeploymentRepository {
     fn create(&mut self, deployment: &Deployment) -> RepositoryResult<()> {
+        let artifact = local_artifact(deployment)?;
         let now = now_unix_ms();
-        let size = i64::try_from(deployment.artifact().size_bytes()).map_err(|_| {
+        let size = i64::try_from(artifact.size_bytes()).map_err(|_| {
             RepositoryError::Storage("artifact size does not fit SQLite INTEGER".into())
         })?;
+        let transaction = self.connection.transaction().map_err(storage_error)?;
 
-        let result = self.connection.execute(
+        let result = transaction.execute(
             "INSERT INTO deployments (
                 id, application_id, environment_id,
                 artifact_version, artifact_size_bytes, artifact_sha256,
@@ -66,25 +82,27 @@ impl DeploymentRepository for SqliteDeploymentRepository {
                 deployment.id().as_str(),
                 deployment.application().as_str(),
                 deployment.environment().as_str(),
-                deployment.artifact().version(),
+                artifact.version(),
                 size,
-                deployment.artifact().sha256(),
+                artifact.sha256(),
                 state_name(deployment.state()),
                 now,
             ],
         );
 
         match result {
-            Ok(_) => Ok(()),
+            Ok(_) => {}
             Err(rusqlite::Error::SqliteFailure(error, _))
                 if error.code == ErrorCode::ConstraintViolation =>
             {
-                Err(RepositoryError::AlreadyExists(
+                return Err(RepositoryError::AlreadyExists(
                     deployment.id().as_str().to_owned(),
-                ))
+                ));
             }
-            Err(error) => Err(storage_error(error)),
+            Err(error) => return Err(storage_error(error)),
         }
+        insert_deployment_model_metadata(&transaction, deployment)?;
+        transaction.commit().map_err(storage_error)
     }
 
     fn reserve(
@@ -92,7 +110,8 @@ impl DeploymentRepository for SqliteDeploymentRepository {
         deployment: &Deployment,
         idempotency_key: Option<&str>,
     ) -> RepositoryResult<DeploymentReservation> {
-        let size = i64::try_from(deployment.artifact().size_bytes()).map_err(|_| {
+        let artifact = local_artifact(deployment)?;
+        let size = i64::try_from(artifact.size_bytes()).map_err(|_| {
             RepositoryError::Storage("artifact size does not fit SQLite INTEGER".into())
         })?;
         let transaction = self
@@ -104,9 +123,11 @@ impl DeploymentRepository for SqliteDeploymentRepository {
             let existing = transaction
                 .query_row(
                     "SELECT d.id, d.application_id, d.environment_id,
-                            d.artifact_version, d.artifact_size_bytes, d.artifact_sha256, d.state
+                            d.artifact_version, d.artifact_size_bytes, d.artifact_sha256, d.state,
+                            m.mechanism_kind, m.release_identity_json
                      FROM deployment_idempotency i
                      JOIN deployments d ON d.id = i.deployment_id
+                     LEFT JOIN deployment_model_metadata m ON m.deployment_id = d.id
                      WHERE i.idempotency_key = ?1",
                     params![key],
                     deployment_row,
@@ -134,8 +155,8 @@ impl DeploymentRepository for SqliteDeploymentRepository {
                 params![
                     deployment.application().as_str(),
                     deployment.environment().as_str(),
-                    deployment.artifact().version(),
-                    deployment.artifact().sha256(),
+                    artifact.version(),
+                    artifact.sha256(),
                     size,
                 ],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
@@ -146,9 +167,9 @@ impl DeploymentRepository for SqliteDeploymentRepository {
             return Err(RepositoryError::ArtifactVersionConflict {
                 application: deployment.application().as_str().to_owned(),
                 environment: deployment.environment().as_str().to_owned(),
-                version: deployment.artifact().version().to_owned(),
+                version: artifact.version().to_owned(),
                 existing_sha256,
-                requested_sha256: deployment.artifact().sha256().to_owned(),
+                requested_sha256: artifact.sha256().to_owned(),
             });
         }
 
@@ -164,14 +185,15 @@ impl DeploymentRepository for SqliteDeploymentRepository {
                     deployment.id().as_str(),
                     deployment.application().as_str(),
                     deployment.environment().as_str(),
-                    deployment.artifact().version(),
+                    artifact.version(),
                     size,
-                    deployment.artifact().sha256(),
+                    artifact.sha256(),
                     state_name(deployment.state()),
                     now,
                 ],
             )
             .map_err(|error| reservation_insert_error(error, deployment))?;
+        insert_deployment_model_metadata(&transaction, deployment)?;
 
         if let Some(key) = idempotency_key {
             transaction
@@ -192,9 +214,12 @@ impl DeploymentRepository for SqliteDeploymentRepository {
         let row = self
             .connection
             .query_row(
-                "SELECT id, application_id, environment_id,
-                        artifact_version, artifact_size_bytes, artifact_sha256, state
-                 FROM deployments WHERE id = ?1",
+                "SELECT d.id, d.application_id, d.environment_id,
+                        d.artifact_version, d.artifact_size_bytes, d.artifact_sha256, d.state,
+                        m.mechanism_kind, m.release_identity_json
+                 FROM deployments d
+                 LEFT JOIN deployment_model_metadata m ON m.deployment_id = d.id
+                 WHERE d.id = ?1",
                 params![id.as_str()],
                 deployment_row,
             )
@@ -215,12 +240,14 @@ impl DeploymentRepository for SqliteDeploymentRepository {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT id, application_id, environment_id,
-                        artifact_version, artifact_size_bytes, artifact_sha256, state
-                 FROM deployments
-                 WHERE (?1 IS NULL OR application_id = ?1)
-                   AND (?2 IS NULL OR environment_id = ?2)
-                 ORDER BY created_at_unix_ms DESC, id DESC
+                "SELECT d.id, d.application_id, d.environment_id,
+                        d.artifact_version, d.artifact_size_bytes, d.artifact_sha256, d.state,
+                        m.mechanism_kind, m.release_identity_json
+                 FROM deployments d
+                 LEFT JOIN deployment_model_metadata m ON m.deployment_id = d.id
+                 WHERE (?1 IS NULL OR d.application_id = ?1)
+                   AND (?2 IS NULL OR d.environment_id = ?2)
+                 ORDER BY d.created_at_unix_ms DESC, d.id DESC
                  LIMIT ?3",
             )
             .map_err(storage_error)?;
@@ -237,11 +264,13 @@ impl DeploymentRepository for SqliteDeploymentRepository {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT id, application_id, environment_id,
-                        artifact_version, artifact_size_bytes, artifact_sha256, state
-                 FROM deployments
-                 WHERE state NOT IN ('succeeded', 'failed', 'rolled_back', 'rollback_failed')
-                 ORDER BY created_at_unix_ms, id",
+                "SELECT d.id, d.application_id, d.environment_id,
+                        d.artifact_version, d.artifact_size_bytes, d.artifact_sha256, d.state,
+                        m.mechanism_kind, m.release_identity_json
+                 FROM deployments d
+                 LEFT JOIN deployment_model_metadata m ON m.deployment_id = d.id
+                 WHERE d.state NOT IN ('succeeded', 'failed', 'rolled_back', 'rollback_failed')
+                 ORDER BY d.created_at_unix_ms, d.id",
             )
             .map_err(storage_error)?;
 
@@ -438,9 +467,39 @@ impl DeploymentRepository for SqliteDeploymentRepository {
 fn same_request_identity(existing: &Deployment, requested: &Deployment) -> bool {
     existing.application() == requested.application()
         && existing.environment() == requested.environment()
-        && existing.artifact().version() == requested.artifact().version()
-        && existing.artifact().size_bytes() == requested.artifact().size_bytes()
-        && existing.artifact().sha256() == requested.artifact().sha256()
+        && existing.mechanism_kind() == requested.mechanism_kind()
+        && existing.release_identity() == requested.release_identity()
+}
+
+fn local_artifact(deployment: &Deployment) -> RepositoryResult<&Artifact> {
+    deployment.release_identity().local_file().ok_or_else(|| {
+        RepositoryError::Storage(
+            "container release persistence is reserved for the phase 9 mechanism adapter".into(),
+        )
+    })
+}
+
+fn insert_deployment_model_metadata(
+    transaction: &rusqlite::Transaction<'_>,
+    deployment: &Deployment,
+) -> RepositoryResult<()> {
+    let release_identity_json =
+        serde_json::to_string(deployment.release_identity()).map_err(|error| {
+            RepositoryError::Storage(format!("serialize release identity: {error}"))
+        })?;
+    transaction
+        .execute(
+            "INSERT INTO deployment_model_metadata (
+                 deployment_id, mechanism_kind, release_identity_json
+             ) VALUES (?1, ?2, ?3)",
+            params![
+                deployment.id().as_str(),
+                deployment.mechanism_kind().as_str(),
+                release_identity_json,
+            ],
+        )
+        .map_err(storage_error)?;
+    Ok(())
 }
 
 fn reservation_insert_error(error: rusqlite::Error, deployment: &Deployment) -> RepositoryError {
@@ -487,23 +546,69 @@ fn deployment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeploymentRow> {
         row.get(4)?,
         row.get(5)?,
         row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
     ))
 }
 
 fn decode_deployment(row: DeploymentRow) -> RepositoryResult<Deployment> {
-    let (id, application, environment, version, size, sha256, state) = row;
+    let (
+        id,
+        application,
+        environment,
+        version,
+        size,
+        sha256,
+        state,
+        mechanism_kind,
+        release_identity_json,
+    ) = row;
     let size = u64::try_from(size)
         .map_err(|_| RepositoryError::CorruptData("negative artifact size".into()))?;
     let id = DeploymentId::new(id).map_err(corrupt_domain)?;
     let application = ApplicationId::new(application).map_err(corrupt_domain)?;
     let environment = EnvironmentId::new(environment).map_err(corrupt_domain)?;
-    let artifact = Artifact::new(version, size, sha256).map_err(corrupt_domain)?;
+    let legacy_artifact = Artifact::new(version, size, sha256).map_err(corrupt_domain)?;
+    let (mechanism_kind, release_identity) = match (mechanism_kind, release_identity_json) {
+        (None, None) => (
+            DeploymentMechanismKind::JarSystemd,
+            ReleaseIdentity::LocalFile(legacy_artifact.clone()),
+        ),
+        (Some(mechanism_kind), Some(release_identity_json)) => {
+            let mechanism_kind =
+                DeploymentMechanismKind::parse(&mechanism_kind).ok_or_else(|| {
+                    RepositoryError::CorruptData(format!(
+                        "unknown deployment mechanism kind: {mechanism_kind}"
+                    ))
+                })?;
+            let release_identity: ReleaseIdentity = serde_json::from_str(&release_identity_json)
+                .map_err(|error| {
+                    RepositoryError::CorruptData(format!(
+                        "invalid deployment release identity metadata: {error}"
+                    ))
+                })?;
+            if let Some(local) = release_identity.local_file() {
+                if local != &legacy_artifact {
+                    return Err(RepositoryError::CorruptData(
+                        "generic release identity does not match legacy local-file columns".into(),
+                    ));
+                }
+            }
+            (mechanism_kind, release_identity)
+        }
+        _ => {
+            return Err(RepositoryError::CorruptData(
+                "deployment model metadata is partially present".into(),
+            ));
+        }
+    };
     let state = parse_state(&state)?;
-    Ok(Deployment::rehydrate(
+    Ok(Deployment::rehydrate_with_release(
         id,
         application,
         environment,
-        artifact,
+        mechanism_kind,
+        release_identity,
         state,
     ))
 }
@@ -749,6 +854,60 @@ mod tests {
             repository.create(&deployment).unwrap_err(),
             RepositoryError::AlreadyExists("d-duplicate".into())
         );
+    }
+
+    #[test]
+    fn generic_model_metadata_round_trips_jar_systemd_release_identity() {
+        let mut repository = SqliteDeploymentRepository::in_memory().unwrap();
+        let deployment = deployment("d-generic-metadata");
+        let id = deployment.id().clone();
+        repository.create(&deployment).unwrap();
+
+        let metadata: (String, String) = repository
+            .connection
+            .query_row(
+                "SELECT mechanism_kind, release_identity_json
+                 FROM deployment_model_metadata WHERE deployment_id = ?1",
+                params![id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(metadata.0, "jar_systemd");
+        assert!(metadata.1.contains("local_file"));
+
+        let restored = repository.get(&id).unwrap().unwrap();
+        assert_eq!(
+            restored.mechanism_kind(),
+            DeploymentMechanismKind::JarSystemd
+        );
+        assert_eq!(restored.release_identity(), deployment.release_identity());
+    }
+
+    #[test]
+    fn legacy_deployment_rows_without_generic_metadata_rehydrate_as_jar_systemd() {
+        let repository = SqliteDeploymentRepository::in_memory().unwrap();
+        repository
+            .connection
+            .execute(
+                "INSERT INTO deployments (
+                     id, application_id, environment_id, artifact_version,
+                     artifact_size_bytes, artifact_sha256, state,
+                     created_at_unix_ms, updated_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'succeeded', 1, 1)",
+                params!["legacy", "demo", "test", "1.0.0", 42_i64, SHA256],
+            )
+            .unwrap();
+
+        let restored = repository
+            .get(&DeploymentId::new("legacy").unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            restored.mechanism_kind(),
+            DeploymentMechanismKind::JarSystemd
+        );
+        assert_eq!(restored.artifact().version(), "1.0.0");
+        assert_eq!(restored.artifact().sha256(), SHA256);
     }
 
     #[test]

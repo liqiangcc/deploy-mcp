@@ -3,11 +3,11 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use super::{
-    DeployRequest, DeployService, DeploymentLockManager, DeploymentOutcome, JarSystemdMechanism,
-    RollbackOutcome, RollbackRequest, RollbackService,
+    DeployRequest, DeployService, DeploymentLockManager, DeploymentMechanismPort,
+    DeploymentOutcome, JarSystemdMechanism, RollbackOutcome, RollbackRequest, RollbackService,
 };
 use crate::config::{ArtifactType, Config};
-use crate::domain::{Deployment, DeploymentId, DeploymentState, RollbackReference};
+use crate::domain::{Deployment, DeploymentId, DeploymentState};
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::ports::{
     AuditEvent, AuditRepository, DeploymentRepository, DeploymentTransition, RemoteExecutionPort,
@@ -64,6 +64,7 @@ where
     D: DeploymentRepository + Send,
 {
     config: Arc<Config>,
+    mechanism: Arc<JarSystemdMechanism<R>>,
     deploy: DeployService<JarSystemdMechanism<R>, D>,
     rollback: RollbackService<JarSystemdMechanism<R>, D>,
     repository: Arc<Mutex<D>>,
@@ -92,13 +93,14 @@ where
         .with_lock_manager(locks.clone());
         let rollback = RollbackService::with_mechanism(
             Arc::clone(&config),
-            mechanism,
+            Arc::clone(&mechanism),
             Arc::clone(&repository),
             Arc::clone(&rollback_repository),
             locks,
         );
         Self {
             config,
+            mechanism,
             deploy,
             rollback,
             repository,
@@ -202,26 +204,16 @@ where
             Ok(environment) => environment,
             Err(error) => return (false, Some(error.to_string())),
         };
-        let rollback_task = match environment.tasks.rollback.as_deref() {
-            Some(task) => task,
-            None => {
-                return (
-                    false,
-                    Some("rollback_unavailable: no rollback task is configured".to_owned()),
-                )
-            }
-        };
-        let reference = match RollbackReference::new(
-            outcome.deployment.id().clone(),
-            outcome.deployment.application().clone(),
-            outcome.deployment.environment().clone(),
-            environment.target.clone(),
-            environment.backup_path.clone(),
-            environment.install_path.clone(),
-            rollback_task.to_owned(),
-            environment.tasks.restart.clone(),
-            environment.tasks.health_check.clone(),
-        ) {
+        if !self.mechanism.rollback_is_configured(environment) {
+            return (
+                false,
+                Some("rollback_unavailable: no rollback task is configured".to_owned()),
+            );
+        }
+        let reference = match self
+            .mechanism
+            .build_rollback_reference(&outcome.deployment, environment)
+        {
             Ok(reference) => reference,
             Err(error) => return (false, Some(error.to_string())),
         };

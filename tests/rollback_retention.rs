@@ -133,6 +133,14 @@ fn retention_prunes_only_inactive_snapshots_in_deterministic_batches() {
         )
         .unwrap();
     assert_eq!(retained, 1);
+    let generic_snapshot_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM rollback_reference_model WHERE deployment_id = ?1",
+            params![d1.id().as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(generic_snapshot_rows, 0);
 
     let audit = SqliteAuditRepository::open(&database_path).unwrap();
     let events = audit.events_for_deployment(d1.id(), 100).unwrap();
