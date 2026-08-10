@@ -1,0 +1,87 @@
+name: Phase 9 Format and Validation
+
+on:
+  push:
+    branches:
+      - feat/v0.2-docker-compose-mechanism
+    paths:
+      - .github/workflows/phase9-format-validate.yml
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install SSH server
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-server
+      - name: Checkout pinned remote-exec-mcp
+        uses: actions/checkout@v4
+        with:
+          repository: liqiangcc/remote-exec-mcp
+          ref: 92da5d6ba86e0c095478d36a1092e321e29bfb9c
+          path: remote-exec-mcp
+          persist-credentials: false
+      - name: Format and validate Rust
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo test --locked --all-features
+      - name: Build pinned remote-exec-mcp
+        run: cargo build --locked --release --manifest-path remote-exec-mcp/Cargo.toml
+      - name: Prepare and verify real systemd target
+        run: |
+          bash scripts/e2e/setup_real_systemd_target.sh
+          DEPLOY_MCP_REAL_E2E=1 \
+          DEPLOY_MCP_E2E_REMOTE_EXEC_BIN="${{ github.workspace }}/remote-exec-mcp/target/release/remote-exec-mcp" \
+          cargo test --locked --test real_systemd_e2e -- --nocapture
+      - name: Prepare and verify real Docker Compose target
+        run: |
+          docker version
+          docker compose version
+          bash scripts/e2e/setup_real_docker_compose_target.sh
+          DEPLOY_MCP_REAL_DOCKER_E2E=1 \
+          DEPLOY_MCP_E2E_REMOTE_EXEC_BIN="${{ github.workspace }}/remote-exec-mcp/target/release/remote-exec-mcp" \
+          cargo test --locked --test real_docker_compose_e2e -- --nocapture
+      - name: Remove temporary formatter workflow
+        run: rm -f .github/workflows/phase9-format-validate.yml
+      - name: Verify and stage exact formatting scope
+        run: |
+          set -euo pipefail
+          git diff --check
+          git diff --name-only | sort | tee /tmp/changed
+          for required in \
+            tests/docker_compose.rs \
+            tests/real_docker_compose_e2e.rs \
+            .github/workflows/phase9-format-validate.yml; do
+            grep -Fxq "$required" /tmp/changed || { echo "missing changed path: $required" >&2; exit 1; }
+          done
+          test "$(wc -l < /tmp/changed)" -eq 3
+          git add -- \
+            tests/docker_compose.rs \
+            tests/real_docker_compose_e2e.rs \
+            .github/workflows/phase9-format-validate.yml
+          git diff --cached --check
+          git diff --cached --name-only | sort | tee /tmp/staged
+          cmp /tmp/changed /tmp/staged
+      - name: Commit validated rustfmt output
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "style: format Docker Compose tests"
+          git push origin HEAD:feat/v0.2-docker-compose-mechanism
