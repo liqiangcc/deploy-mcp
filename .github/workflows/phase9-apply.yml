@@ -77,20 +77,27 @@ jobs:
             .github/workflows/phase9-source-export.yml \
             .github/workflows/phase9-apply.yml
           git diff --cached --check
-          actual=$(git diff --cached --name-only | sort)
-          expected=$(printf '%s\n' \
-            '.github/workflows/phase9-apply.yml' \
-            '.github/workflows/phase9-source-export.yml' \
-            '.phase9/delta01.txt' '.phase9/delta02.txt' '.phase9/delta03.txt' \
-            '.phase9/fix-newlines.txt' '.phase9/fix-lints.txt' '.phase9/fix-tests.txt' '.phase9/migration007.sql' '.phase9/phase9.patch.gz.b64' \
-            '.phase9/part01.txt' '.phase9/part02.txt' '.phase9/part03.txt' '.phase9/part04.txt' \
-            '.phase9/part05.txt' '.phase9/part06.txt' '.phase9/part07.txt' \
-            'migrations/007_deployment_rollback_capture.sql' \
-            'src/application/api.rs' 'src/application/deploy.rs' 'src/application/mechanism.rs' \
-            'src/application/mod.rs' 'src/config.rs' 'src/domain/deployment.rs' 'src/domain/mod.rs' 'src/domain/rollback.rs' \
-            'src/mcp.rs' 'src/persistence.rs' 'src/ports.rs' 'src/recovery_persistence.rs' \
-            'src/rollback_persistence.rs' | sort)
-          test "$actual" = "$expected"
+          git diff --cached --name-only | sort | tee /tmp/staged-paths
+          while IFS= read -r path; do
+            case "$path" in
+              migrations/007_deployment_rollback_capture.sql|\
+              src/application/api.rs|src/application/deploy.rs|src/application/mechanism.rs|src/application/mod.rs|\
+              src/config.rs|src/domain/deployment.rs|src/domain/mod.rs|src/domain/rollback.rs|\
+              src/mcp.rs|src/persistence.rs|src/ports.rs|src/recovery_persistence.rs|src/rollback_persistence.rs|\
+              .phase9/phase9.patch.gz.b64|.phase9/part01.txt|.phase9/part02.txt|.phase9/part03.txt|.phase9/part04.txt|\
+              .phase9/part05.txt|.phase9/part06.txt|.phase9/part07.txt|.phase9/delta01.txt|.phase9/delta02.txt|.phase9/delta03.txt|\
+              .phase9/fix-newlines.txt|.phase9/fix-lints.txt|.phase9/fix-tests.txt|.phase9/migration007.sql|\
+              .github/workflows/phase9-source-export.yml|.github/workflows/phase9-apply.yml) ;;
+              *) echo "unexpected staged path: $path" >&2; exit 1 ;;
+            esac
+          done < /tmp/staged-paths
+          for required in \
+            migrations/007_deployment_rollback_capture.sql \
+            src/application/api.rs src/application/deploy.rs src/application/mechanism.rs src/application/mod.rs \
+            src/config.rs src/domain/deployment.rs src/domain/mod.rs src/domain/rollback.rs \
+            src/mcp.rs src/persistence.rs src/ports.rs src/recovery_persistence.rs src/rollback_persistence.rs; do
+            grep -Fxq "$required" /tmp/staged-paths || { echo "missing required staged path: $required" >&2; exit 1; }
+          done
       - name: Commit and push validated implementation
         run: |
           git config user.name "github-actions[bot]"
