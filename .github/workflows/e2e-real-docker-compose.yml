@@ -1,0 +1,84 @@
+name: Real remote-exec Docker Compose E2E
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - src/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/e2e-real-docker-compose.yml
+      - scripts/e2e/**
+      - tests/real_docker_compose_e2e.rs
+      - tests/docker_compose.rs
+  pull_request:
+    branches:
+      - main
+    paths:
+      - src/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/e2e-real-docker-compose.yml
+      - scripts/e2e/**
+      - tests/real_docker_compose_e2e.rs
+      - tests/docker_compose.rs
+
+permissions:
+  contents: read
+
+jobs:
+  real-docker-compose-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout deploy-mcp
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned remote-exec-mcp
+        uses: actions/checkout@v4
+        with:
+          repository: liqiangcc/remote-exec-mcp
+          ref: 92da5d6ba86e0c095478d36a1092e321e29bfb9c
+          path: remote-exec-mcp
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install SSH server
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-server
+
+      - name: Verify Docker Compose
+        run: |
+          docker version
+          docker compose version
+
+      - name: Build pinned remote-exec-mcp
+        run: cargo build --locked --release --manifest-path remote-exec-mcp/Cargo.toml
+
+      - name: Build deploy-mcp
+        run: cargo build --locked --bin deploy-mcp
+
+      - name: Prepare disposable SSH + Docker Compose target
+        run: bash scripts/e2e/setup_real_docker_compose_target.sh
+
+      - name: Run full MCP-to-Docker-Compose acceptance test
+        env:
+          DEPLOY_MCP_REAL_DOCKER_E2E: '1'
+          DEPLOY_MCP_E2E_REMOTE_EXEC_BIN: ${{ github.workspace }}/remote-exec-mcp/target/release/remote-exec-mcp
+        run: cargo test --locked --test real_docker_compose_e2e -- --nocapture
+
+      - name: Capture diagnostics on failure
+        if: failure()
+        run: |
+          docker ps -a || true
+          docker compose -p deploy-mcp-e2e -f /home/deploy/docker/compose.yml --env-file /home/deploy/docker/.env ps || true
+          docker compose -p deploy-mcp-e2e -f /home/deploy/docker/compose.yml --env-file /home/deploy/docker/.env logs --no-color || true
+          if [[ -n "${DEPLOY_MCP_DOCKER_E2E_WORK_ROOT:-}" ]]; then
+            test ! -f "$DEPLOY_MCP_DOCKER_E2E_WORK_ROOT/sshd.log" || cat "$DEPLOY_MCP_DOCKER_E2E_WORK_ROOT/sshd.log"
+            test ! -f "$DEPLOY_MCP_DOCKER_E2E_WORK_ROOT/remote-exec-audit.jsonl" || cat "$DEPLOY_MCP_DOCKER_E2E_WORK_ROOT/remote-exec-audit.jsonl"
+          fi
