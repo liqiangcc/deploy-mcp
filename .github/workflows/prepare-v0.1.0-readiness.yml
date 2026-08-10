@@ -1,0 +1,84 @@
+name: Prepare v0.1.0 readiness
+
+on:
+  push:
+    branches:
+      - release/v0.1.0-readiness
+    paths:
+      - .github/workflows/prepare-v0.1.0-readiness.yml
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Update release documentation and license
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          replacements = {
+              Path("README.md"): [
+                  ("cargo build --release", "cargo build --locked --release"),
+                  ("cargo clippy --all-targets --all-features -- -D warnings", "cargo clippy --locked --all-targets --all-features -- -D warnings"),
+                  ("cargo test --all-features", "cargo test --locked --all-features"),
+              ],
+              Path("docs/SETUP.md"): [
+                  ("cargo build --release", "cargo build --locked --release"),
+              ],
+          }
+
+          for path, edits in replacements.items():
+              text = path.read_text()
+              for old, new in edits:
+                  count = text.count(old)
+                  if count != 1:
+                      raise SystemExit(f"expected exactly one occurrence of {old!r} in {path}, found {count}")
+                  text = text.replace(old, new)
+              path.write_text(text)
+
+          Path("LICENSE").write_text("""MIT License
+
+Copyright (c) 2026 Liqiangcc
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the \"Software\"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+""")
+          PY
+
+          git diff --check
+          grep -F 'cargo build --locked --release' README.md
+          grep -F 'cargo clippy --locked --all-targets --all-features -- -D warnings' README.md
+          grep -F 'cargo test --locked --all-features' README.md
+          grep -F 'cargo build --locked --release' docs/SETUP.md
+          test -s LICENSE
+
+      - name: Commit readiness changes
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- README.md docs/SETUP.md LICENSE
+          git diff --cached --check
+          git commit -m 'docs: prepare v0.1.0 release'
+          git push origin HEAD:release/v0.1.0-readiness
