@@ -16,9 +16,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Archive source
-        run: tar --exclude=.git -czf deploy-mcp-source.tar.gz .
+        run: tar --exclude=.git -czf ../deploy-mcp-source.tar.gz .
       - uses: actions/upload-artifact@v4
         with:
           name: deploy-mcp-phase9-source
-          path: deploy-mcp-source.tar.gz
+          path: ../deploy-mcp-source.tar.gz
           retention-days: 1
