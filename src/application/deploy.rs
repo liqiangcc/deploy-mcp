@@ -1,14 +1,13 @@
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 use tokio::time::{sleep, timeout, Duration};
 use uuid::Uuid;
 
 use super::{
-    artifact_access::resolve_allowed_artifact_path, preflight_remote_capabilities,
+    artifact_access::resolve_allowed_artifact_path,
+    mechanism::{DeploymentMechanismAction, DeploymentMechanismPort, JarSystemdMechanism},
     DeploymentLockManager, RemotePreflightError,
 };
 use crate::config::{Config, EnvironmentConfig};
@@ -88,26 +87,44 @@ pub struct DeploymentOutcome {
     pub idempotent_replay: bool,
 }
 
-pub struct DeployService<R, D>
+pub struct DeployService<M, D>
 where
-    R: RemoteExecutionPort + ?Sized,
+    M: DeploymentMechanismPort + ?Sized,
     D: DeploymentRepository + Send,
 {
     config: Arc<Config>,
-    remote: Arc<R>,
+    mechanism: Arc<M>,
     repository: Arc<Mutex<D>>,
     locks: DeploymentLockManager,
 }
 
-impl<R, D> DeployService<R, D>
+impl<R, D> DeployService<JarSystemdMechanism<R>, D>
 where
     R: RemoteExecutionPort + ?Sized,
     D: DeploymentRepository + Send,
 {
     pub fn new(config: Arc<Config>, remote: Arc<R>, repository: Arc<Mutex<D>>) -> Self {
+        Self::with_mechanism(
+            config,
+            Arc::new(JarSystemdMechanism::new(remote)),
+            repository,
+        )
+    }
+}
+
+impl<M, D> DeployService<M, D>
+where
+    M: DeploymentMechanismPort + ?Sized,
+    D: DeploymentRepository + Send,
+{
+    pub fn with_mechanism(
+        config: Arc<Config>,
+        mechanism: Arc<M>,
+        repository: Arc<Mutex<D>>,
+    ) -> Self {
         Self {
             config,
-            remote,
+            mechanism,
             repository,
             locks: DeploymentLockManager::default(),
         }
@@ -198,14 +215,16 @@ where
                 .finish_primary_failure(deployment, &plan, &environment, failure)
                 .await;
         }
-        if let Some(precheck) = &environment.tasks.precheck {
+        if self
+            .mechanism
+            .action_is_configured(&environment, DeploymentMechanismAction::Precheck)
+        {
             if let Some(failure) = self
-                .execute_named_task(
+                .execute_mechanism_task(
                     deployment.id(),
                     DeploymentStep::Precheck,
-                    &environment.target,
-                    precheck,
-                    BTreeMap::new(),
+                    &environment,
+                    DeploymentMechanismAction::Precheck,
                     ErrorCode::PrecheckFailed,
                     "configured precheck task failed",
                 )
@@ -234,12 +253,11 @@ where
 
         self.transition(&mut deployment, DeploymentState::BackingUp)?;
         if let Some(failure) = self
-            .execute_named_task(
+            .execute_mechanism_task(
                 deployment.id(),
                 DeploymentStep::BackupCurrent,
-                &environment.target,
-                &environment.tasks.backup,
-                backup_parameters(&environment),
+                &environment,
+                DeploymentMechanismAction::CaptureRollback,
                 ErrorCode::RemoteExecutionFailed,
                 "backup task failed",
             )
@@ -252,12 +270,11 @@ where
 
         self.transition(&mut deployment, DeploymentState::Installing)?;
         if let Some(failure) = self
-            .execute_named_task(
+            .execute_mechanism_task(
                 deployment.id(),
                 DeploymentStep::Install,
-                &environment.target,
-                &environment.tasks.install,
-                install_parameters(&environment),
+                &environment,
+                DeploymentMechanismAction::Apply,
                 ErrorCode::RemoteExecutionFailed,
                 "install task failed",
             )
@@ -270,12 +287,11 @@ where
 
         self.transition(&mut deployment, DeploymentState::Restarting)?;
         if let Some(failure) = self
-            .execute_named_task(
+            .execute_mechanism_task(
                 deployment.id(),
                 DeploymentStep::Restart,
-                &environment.target,
-                &environment.tasks.restart,
-                BTreeMap::new(),
+                &environment,
+                DeploymentMechanismAction::Activate,
                 ErrorCode::RemoteExecutionFailed,
                 "restart task failed",
             )
@@ -290,8 +306,7 @@ where
         if let Some(failure) = self
             .execute_verification(
                 deployment.id(),
-                &environment.target,
-                &environment.tasks.health_check,
+                &environment,
                 ErrorCode::VerificationFailed,
                 "health-check task failed",
             )
@@ -331,7 +346,7 @@ where
         let timeout_ms = self.config.runtime.deployment_step_timeout_ms;
         let result = timeout(
             Duration::from_millis(timeout_ms),
-            preflight_remote_capabilities(self.remote.as_ref(), environment),
+            self.mechanism.preflight(environment),
         )
         .await;
         let failure = match result {
@@ -357,12 +372,7 @@ where
         let timeout_ms = self.config.runtime.deployment_step_timeout_ms;
         let result = timeout(
             Duration::from_millis(timeout_ms),
-            self.remote.upload_file(
-                &environment.target,
-                local_path,
-                &environment.staging_path,
-                true,
-            ),
+            self.mechanism.prepare(environment, local_path),
         )
         .await;
 
@@ -392,14 +402,12 @@ where
         Ok(failure)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn execute_named_task(
+    async fn execute_mechanism_task(
         &self,
         deployment_id: &DeploymentId,
         step: DeploymentStep,
-        target: &str,
-        task: &str,
-        parameters: BTreeMap<String, Value>,
+        environment: &EnvironmentConfig,
+        mechanism_action: DeploymentMechanismAction,
         failure_code: ErrorCode,
         action: &str,
     ) -> AppResult<Option<DeploymentFailure>> {
@@ -407,18 +415,18 @@ where
         let timeout_ms = self.config.runtime.deployment_step_timeout_ms;
         let result = timeout(
             Duration::from_millis(timeout_ms),
-            self.remote.run_task(target, task, parameters),
+            self.mechanism.execute(environment, mechanism_action),
         )
         .await;
         let failure = match result {
             Err(_) => Some(deployment_timeout_failure(step, timeout_ms)),
-            Ok(Ok(result)) if result.success => None,
-            Ok(Ok(result)) => Some(task_result_failure(
+            Ok(Ok(execution)) if execution.result.success => None,
+            Ok(Ok(execution)) => Some(task_result_failure(
                 step,
                 failure_code,
                 action,
-                task,
-                &result,
+                &execution.task,
+                &execution.result,
             )),
             Ok(Err(error)) => Some(DeploymentFailure::from_remote(
                 step,
@@ -435,8 +443,7 @@ where
     async fn execute_verification(
         &self,
         deployment_id: &DeploymentId,
-        target: &str,
-        task: &str,
+        environment: &EnvironmentConfig,
         failure_code: ErrorCode,
         action: &str,
     ) -> AppResult<Option<DeploymentFailure>> {
@@ -444,12 +451,11 @@ where
         let retry_delay_ms = self.config.runtime.verification_retry_delay_ms;
         for attempt in 1..=max_attempts {
             let failure = self
-                .execute_named_task(
+                .execute_mechanism_task(
                     deployment_id,
                     DeploymentStep::Verify,
-                    target,
-                    task,
-                    BTreeMap::new(),
+                    environment,
+                    DeploymentMechanismAction::Verify,
                     failure_code,
                     action,
                 )
@@ -525,24 +531,23 @@ where
         deployment_id: &DeploymentId,
         environment: &EnvironmentConfig,
     ) -> AppResult<Option<DeploymentFailure>> {
-        let rollback_task = match environment.tasks.rollback.as_deref() {
-            Some(task) => task,
-            None => {
-                return Ok(Some(DeploymentFailure::new(
-                    DeploymentStep::Install,
-                    ErrorCode::RollbackUnavailable,
-                    "rollback was required but no rollback task is configured",
-                )))
-            }
-        };
+        if !self
+            .mechanism
+            .action_is_configured(environment, DeploymentMechanismAction::RollbackRestore)
+        {
+            return Ok(Some(DeploymentFailure::new(
+                DeploymentStep::Install,
+                ErrorCode::RollbackUnavailable,
+                "rollback was required but no rollback task is configured",
+            )));
+        }
 
         if let Some(failure) = self
-            .execute_named_task(
+            .execute_mechanism_task(
                 deployment_id,
                 DeploymentStep::Install,
-                &environment.target,
-                rollback_task,
-                rollback_parameters(environment),
+                environment,
+                DeploymentMechanismAction::RollbackRestore,
                 ErrorCode::RollbackFailed,
                 "rollback restore task failed",
             )
@@ -552,12 +557,11 @@ where
         }
 
         if let Some(failure) = self
-            .execute_named_task(
+            .execute_mechanism_task(
                 deployment_id,
                 DeploymentStep::Restart,
-                &environment.target,
-                &environment.tasks.restart,
-                BTreeMap::new(),
+                environment,
+                DeploymentMechanismAction::Activate,
                 ErrorCode::RollbackFailed,
                 "rollback restart task failed",
             )
@@ -568,8 +572,7 @@ where
 
         self.execute_verification(
             deployment_id,
-            &environment.target,
-            &environment.tasks.health_check,
+            environment,
             ErrorCode::RollbackFailed,
             "rollback verification task failed",
         )
@@ -753,45 +756,6 @@ fn task_result_failure(
     )
 }
 
-fn backup_parameters(environment: &EnvironmentConfig) -> BTreeMap<String, Value> {
-    BTreeMap::from([
-        (
-            "install_path".to_owned(),
-            Value::String(environment.install_path.clone()),
-        ),
-        (
-            "backup_path".to_owned(),
-            Value::String(environment.backup_path.clone()),
-        ),
-    ])
-}
-
-fn install_parameters(environment: &EnvironmentConfig) -> BTreeMap<String, Value> {
-    BTreeMap::from([
-        (
-            "staging_path".to_owned(),
-            Value::String(environment.staging_path.clone()),
-        ),
-        (
-            "install_path".to_owned(),
-            Value::String(environment.install_path.clone()),
-        ),
-    ])
-}
-
-fn rollback_parameters(environment: &EnvironmentConfig) -> BTreeMap<String, Value> {
-    BTreeMap::from([
-        (
-            "backup_path".to_owned(),
-            Value::String(environment.backup_path.clone()),
-        ),
-        (
-            "install_path".to_owned(),
-            Value::String(environment.install_path.clone()),
-        ),
-    ])
-}
-
 fn repository_error(error: RepositoryError) -> AppError {
     match error {
         RepositoryError::AlreadyExists(_) | RepositoryError::MutationConflict { .. } => {
@@ -835,6 +799,7 @@ mod tests {
     use crate::ports::{
         RemoteTargetCheck, RemoteTaskResult, RemoteTransferResult, StepAttemptStatus,
     };
+    use serde_json::Value;
     use tempfile::tempdir;
 
     const CONFIG: &str = r#"

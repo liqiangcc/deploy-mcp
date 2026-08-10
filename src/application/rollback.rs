@@ -1,11 +1,15 @@
-use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-use serde_json::Value;
 use tokio::time::{sleep, timeout, Duration};
 use uuid::Uuid;
 
-use super::DeploymentLockManager;
+use super::{
+    mechanism::{
+        DeploymentMechanismPort, JarSystemdMechanism, RollbackMechanismAction,
+        RollbackPreflightError,
+    },
+    DeploymentLockManager,
+};
 use crate::config::{Config, EnvironmentConfig};
 use crate::domain::{
     DeploymentId, DeploymentState, RollbackOperation, RollbackOperationId, RollbackOperationState,
@@ -35,19 +39,19 @@ pub struct RollbackOutcome {
     pub failure: Option<RollbackFailure>,
 }
 
-pub struct RollbackService<R, D>
+pub struct RollbackService<M, D>
 where
-    R: RemoteExecutionPort + ?Sized,
+    M: DeploymentMechanismPort + ?Sized,
     D: DeploymentRepository + Send,
 {
     config: Arc<Config>,
-    remote: Arc<R>,
+    mechanism: Arc<M>,
     deployments: Arc<Mutex<D>>,
     rollbacks: Arc<Mutex<Box<dyn RollbackRepository + Send>>>,
     locks: DeploymentLockManager,
 }
 
-impl<R, D> RollbackService<R, D>
+impl<R, D> RollbackService<JarSystemdMechanism<R>, D>
 where
     R: RemoteExecutionPort + ?Sized,
     D: DeploymentRepository + Send,
@@ -59,9 +63,31 @@ where
         rollbacks: Arc<Mutex<Box<dyn RollbackRepository + Send>>>,
         locks: DeploymentLockManager,
     ) -> Self {
+        Self::with_mechanism(
+            config,
+            Arc::new(JarSystemdMechanism::new(remote)),
+            deployments,
+            rollbacks,
+            locks,
+        )
+    }
+}
+
+impl<M, D> RollbackService<M, D>
+where
+    M: DeploymentMechanismPort + ?Sized,
+    D: DeploymentRepository + Send,
+{
+    pub fn with_mechanism(
+        config: Arc<Config>,
+        mechanism: Arc<M>,
+        deployments: Arc<Mutex<D>>,
+        rollbacks: Arc<Mutex<Box<dyn RollbackRepository + Send>>>,
+        locks: DeploymentLockManager,
+    ) -> Self {
         Self {
             config,
-            remote,
+            mechanism,
             deployments,
             rollbacks,
             locks,
@@ -164,17 +190,7 @@ where
             if let Some(failure) = self
                 .run_task(
                     &reference,
-                    reference.rollback_task(),
-                    BTreeMap::from([
-                        (
-                            "backup_path".to_owned(),
-                            Value::String(reference.backup_path().to_owned()),
-                        ),
-                        (
-                            "install_path".to_owned(),
-                            Value::String(reference.install_path().to_owned()),
-                        ),
-                    ]),
+                    RollbackMechanismAction::Restore,
                     "rollback restore task failed",
                 )
                 .await
@@ -184,8 +200,7 @@ where
             if let Some(failure) = self
                 .run_task(
                     &reference,
-                    reference.restart_task(),
-                    BTreeMap::new(),
+                    RollbackMechanismAction::Activate,
                     "rollback restart task failed",
                 )
                 .await
@@ -231,63 +246,46 @@ where
     }
 
     async fn preflight(&self, reference: &RollbackReference) -> Option<RollbackFailure> {
-        match self.remote.check_target(reference.target()).await {
-            Ok(target) if target.reachable => {}
-            Ok(_) => {
-                return Some(RollbackFailure::new(
-                    ErrorCode::PrecheckFailed,
-                    format!("rollback target is not reachable: {}", reference.target()),
+        match self.mechanism.preflight_rollback(reference).await {
+            Ok(_) => None,
+            Err(RollbackPreflightError::TargetUnreachable(target)) => Some(RollbackFailure::new(
+                ErrorCode::PrecheckFailed,
+                format!("rollback target is not reachable: {target}"),
+            )),
+            Err(RollbackPreflightError::MissingCapabilities { tasks, .. }) => {
+                Some(RollbackFailure::new(
+                    ErrorCode::RemoteCapabilityMissing,
+                    format!("rollback target is missing capabilities: {tasks:?}"),
                 ))
             }
-            Err(error) => {
-                return Some(RollbackFailure::from_remote(
-                    ErrorCode::PrecheckFailed,
-                    "rollback target preflight failed",
-                    error,
-                ))
-            }
-        }
-
-        let tasks = match self.remote.list_tasks(reference.target()).await {
-            Ok(tasks) => tasks,
-            Err(error) => {
-                return Some(RollbackFailure::from_remote(
+            Err(RollbackPreflightError::TargetCheck(error)) => Some(RollbackFailure::from_remote(
+                ErrorCode::PrecheckFailed,
+                "rollback target preflight failed",
+                error,
+            )),
+            Err(RollbackPreflightError::CapabilityDiscovery(error)) => {
+                Some(RollbackFailure::from_remote(
                     ErrorCode::PrecheckFailed,
                     "rollback capability preflight failed",
                     error,
                 ))
             }
-        };
-        let required = BTreeSet::from([
-            reference.rollback_task().to_owned(),
-            reference.restart_task().to_owned(),
-            reference.health_check_task().to_owned(),
-        ]);
-        let missing = required.difference(&tasks).cloned().collect::<Vec<_>>();
-        if missing.is_empty() {
-            None
-        } else {
-            Some(RollbackFailure::new(
-                ErrorCode::RemoteCapabilityMissing,
-                format!("rollback target is missing capabilities: {missing:?}"),
-            ))
         }
     }
 
     async fn run_task(
         &self,
         reference: &RollbackReference,
-        task: &str,
-        parameters: BTreeMap<String, Value>,
+        mechanism_action: RollbackMechanismAction,
         action: &str,
     ) -> Option<RollbackFailure> {
         match self
-            .remote
-            .run_task(reference.target(), task, parameters)
+            .mechanism
+            .execute_rollback(reference, mechanism_action)
             .await
         {
-            Ok(result) if result.success => None,
-            Ok(result) => Some(task_failure(action, task, &result)),
+            Ok(execution) if execution.result.success => None,
+            Ok(execution) => Some(task_failure(action, &execution.task, &execution.result)),
             Err(error) => Some(RollbackFailure::from_remote(
                 ErrorCode::RollbackFailed,
                 action,
@@ -306,8 +304,7 @@ where
             let failure = self
                 .run_task(
                     reference,
-                    reference.health_check_task(),
-                    BTreeMap::new(),
+                    RollbackMechanismAction::Verify,
                     "rollback verification task failed",
                 )
                 .await;

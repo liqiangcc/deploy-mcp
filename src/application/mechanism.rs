@@ -8,7 +8,8 @@ use super::{preflight_remote_capabilities, RemotePreflightError, RemotePreflight
 use crate::config::EnvironmentConfig;
 use crate::domain::RollbackReference;
 use crate::ports::{
-    RemoteExecutionPort, RemoteExecutionResult, RemoteTaskResult, RemoteTransferResult,
+    RemoteExecutionError, RemoteExecutionPort, RemoteExecutionResult, RemoteTaskResult,
+    RemoteTransferResult,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
