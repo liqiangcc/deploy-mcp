@@ -78,7 +78,7 @@ cat > "$ROOT/build/Dockerfile" <<'EOF2'
 FROM alpine:3.20
 ARG VERSION
 ENV APP_VERSION=$VERSION
-CMD ["sh", "-c", "printf '%s\\n' \"$APP_VERSION\" > /state/running-version && exec sleep 3600"]
+CMD ["sh", "-c", "trap 'exit 0' TERM INT; printf '%s\\n' \"$APP_VERSION\" > /state/running-version; while :; do sleep 1 & wait $! || true; done"]
 EOF2
 
 build_and_push() {
