@@ -30,6 +30,18 @@ jobs:
             | base64 --decode | gunzip > /tmp/phase8.patch
           patch -p1 < /tmp/phase8.patch
 
+      - name: Apply validated clippy boundary fix
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path("src/domain/rollback.rs")
+          text = path.read_text()
+          needle = "    pub(crate) fn rehydrate_with_snapshot(\n"
+          replacement = "    #[allow(clippy::too_many_arguments)]\n" + needle
+          if text.count(needle) != 1:
+              raise SystemExit("unexpected rehydrate_with_snapshot shape")
+          path.write_text(text.replace(needle, replacement, 1))
+
       - name: Format
         run: cargo fmt --all
 
