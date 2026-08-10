@@ -22,7 +22,30 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Apply deterministic mechanism extraction
-        run: python3 scripts/phase8_apply.py
+        run: |
+          python3 scripts/phase8_apply.py
+          python3 - <<'PY'
+          from pathlib import Path
+
+          mechanism = Path('src/application/mechanism.rs')
+          text = mechanism.read_text()
+          old = '''use crate::ports::{
+              RemoteExecutionPort, RemoteExecutionResult, RemoteTaskResult, RemoteTransferResult,
+          };'''
+          new = '''use crate::ports::{
+              RemoteExecutionError, RemoteExecutionPort, RemoteExecutionResult, RemoteTaskResult,
+              RemoteTransferResult,
+          };'''
+          assert old in text
+          mechanism.write_text(text.replace(old, new, 1))
+
+          deploy = Path('src/application/deploy.rs')
+          text = deploy.read_text()
+          old = '    use tempfile::tempdir;\n'
+          new = '    use serde_json::Value;\n    use tempfile::tempdir;\n'
+          assert old in text
+          deploy.write_text(text.replace(old, new, 1))
+          PY
 
       - name: Format
         run: cargo fmt --all
