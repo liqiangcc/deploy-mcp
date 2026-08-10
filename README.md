@@ -62,7 +62,7 @@ Docker, Kubernetes, Helm, build pipelines, log querying, and configuration manag
 Requires a current stable Rust toolchain.
 
 ```bash
-cargo build --release
+cargo build --locked --release
 ```
 
 Main binaries:
@@ -190,8 +190,8 @@ CI requires:
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-features
 ```
 
 The all-features test suite includes a disposable real MCP stdio child-process fixture for `RemoteExecMcpAdapter`. It verifies a successful protocol round-trip, structured remote error preservation, and malformed-response classification without requiring a live SSH host.
