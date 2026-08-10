@@ -1,0 +1,73 @@
+name: Phase 8 Apply Generic Model
+
+on:
+  push:
+    branches:
+      - feat/v0.2-generic-deployment-model
+    paths:
+      - .github/workflows/phase8-apply-generic-model.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/v0.2-generic-deployment-model
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Apply deterministic source transform
+        shell: bash
+        run: |
+          cat .phase8/patch.00 .phase8/patch.01 .phase8/patch.02 .phase8/patch.03 .phase8/patch.04 \
+            | base64 --decode | gunzip > /tmp/phase8.patch
+          patch -p1 < /tmp/phase8.patch
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --all-features
+
+      - name: Commit validated implementation and remove helpers
+        shell: bash
+        run: |
+          rm -f .phase8/patch.00 .phase8/patch.01 .phase8/patch.02 .phase8/patch.03 .phase8/patch.04
+          rm -f .github/workflows/phase8-source-export.yml
+          rm -f .github/workflows/phase8-apply-generic-model.yml
+          git add -- \
+            migrations/006_v0_2_generic_model.sql \
+            src/application/api.rs \
+            src/application/deploy.rs \
+            src/application/mechanism.rs \
+            src/application/mod.rs \
+            src/application/rollback.rs \
+            src/config.rs \
+            src/domain/deployment.rs \
+            src/domain/mod.rs \
+            src/domain/plan.rs \
+            src/domain/rollback.rs \
+            src/persistence.rs \
+            src/rollback_persistence.rs \
+            tests/rollback_retention.rs
+          git add -u -- \
+            .phase8/patch.00 .phase8/patch.01 .phase8/patch.02 .phase8/patch.03 .phase8/patch.04 \
+            .github/workflows/phase8-source-export.yml \
+            .github/workflows/phase8-apply-generic-model.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "refactor: generalize deployment model metadata"
+          git push origin HEAD:feat/v0.2-generic-deployment-model
