@@ -20,8 +20,8 @@ pub use api::{
 pub use deploy::{DeployRequest, DeployService, DeploymentFailure, DeploymentOutcome};
 pub use lock::{DeploymentLease, DeploymentLockManager};
 pub use mechanism::{
-    DeploymentMechanismAction, DeploymentMechanismPort, JarSystemdMechanism,
-    MechanismTaskExecution, RollbackMechanismAction, RollbackPreflightError,
+    DeploymentMechanismPort, JarSystemdMechanism, MechanismTaskExecution, RollbackMechanismAction,
+    RollbackPreflightError,
 };
 pub use preflight::{preflight_remote_capabilities, RemotePreflightError, RemotePreflightReport};
 pub use recovery::{

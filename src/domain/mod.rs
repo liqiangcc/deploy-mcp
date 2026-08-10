@@ -4,15 +4,16 @@ mod recovery;
 mod rollback;
 
 pub use deployment::{
-    ApplicationId, Artifact, Deployment, DeploymentError, DeploymentId, DeploymentState,
-    EnvironmentId,
+    ApplicationId, Artifact, ContainerImageReleaseIdentity, Deployment, DeploymentError,
+    DeploymentId, DeploymentMechanismKind, DeploymentState, EnvironmentId, ReleaseIdentity,
 };
-pub use plan::{DeploymentPlan, DeploymentStep, RollbackBoundary};
+pub use plan::{DeploymentLifecycleOperation, DeploymentPlan, DeploymentStep, RollbackBoundary};
 pub use recovery::{
     RecoveryAcknowledgement, RecoveryAcknowledgementRecord, RecoveryDisposition, RecoveryError,
     RecoveryIncident, RecoverySubjectKind,
 };
 pub use rollback::{
-    RollbackError, RollbackOperation, RollbackOperationId, RollbackOperationState,
+    JarSystemdRollbackSnapshot, MechanismContractFingerprint, RollbackError,
+    RollbackMechanismSnapshot, RollbackOperation, RollbackOperationId, RollbackOperationState,
     RollbackReference, RollbackReferenceState,
 };

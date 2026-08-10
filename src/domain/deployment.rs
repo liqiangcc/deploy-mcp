@@ -26,6 +26,30 @@ id_type!(ApplicationId);
 id_type!(EnvironmentId);
 id_type!(DeploymentId);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeploymentMechanismKind {
+    JarSystemd,
+    DockerCompose,
+}
+
+impl DeploymentMechanismKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::JarSystemd => "jar_systemd",
+            Self::DockerCompose => "docker_compose",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "jar_systemd" => Some(Self::JarSystemd),
+            "docker_compose" => Some(Self::DockerCompose),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Artifact {
     version: String,
@@ -69,6 +93,84 @@ impl Artifact {
 
     pub fn sha256(&self) -> &str {
         &self.sha256
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContainerImageReleaseIdentity {
+    version: String,
+    repository: String,
+    digest: String,
+}
+
+impl ContainerImageReleaseIdentity {
+    pub fn new(
+        version: impl Into<String>,
+        repository: impl Into<String>,
+        digest: impl Into<String>,
+    ) -> Result<Self, DeploymentError> {
+        let version = version.into();
+        if version.trim().is_empty() {
+            return Err(DeploymentError::InvalidArtifactVersion);
+        }
+        let repository = repository.into();
+        if repository.trim().is_empty() {
+            return Err(DeploymentError::InvalidContainerRepository);
+        }
+        let digest = digest.into();
+        let Some(hex) = digest.strip_prefix("sha256:") else {
+            return Err(DeploymentError::InvalidContainerDigest);
+        };
+        if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(DeploymentError::InvalidContainerDigest);
+        }
+        Ok(Self {
+            version,
+            repository,
+            digest: format!("sha256:{}", hex.to_ascii_lowercase()),
+        })
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    pub fn repository(&self) -> &str {
+        &self.repository
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "identity", rename_all = "snake_case")]
+pub enum ReleaseIdentity {
+    LocalFile(Artifact),
+    ContainerImage(ContainerImageReleaseIdentity),
+}
+
+impl ReleaseIdentity {
+    pub fn version(&self) -> &str {
+        match self {
+            Self::LocalFile(artifact) => artifact.version(),
+            Self::ContainerImage(image) => image.version(),
+        }
+    }
+
+    pub fn local_file(&self) -> Option<&Artifact> {
+        match self {
+            Self::LocalFile(artifact) => Some(artifact),
+            Self::ContainerImage(_) => None,
+        }
+    }
+
+    pub fn container_image(&self) -> Option<&ContainerImageReleaseIdentity> {
+        match self {
+            Self::ContainerImage(image) => Some(image),
+            Self::LocalFile(_) => None,
+        }
     }
 }
 
@@ -161,26 +263,47 @@ pub struct Deployment {
     id: DeploymentId,
     application: ApplicationId,
     environment: EnvironmentId,
-    artifact: Artifact,
+    mechanism_kind: DeploymentMechanismKind,
+    release_identity: ReleaseIdentity,
     state: DeploymentState,
 }
 
 impl Deployment {
+    /// Backward-compatible constructor for the v0.1 local JAR request model.
     pub fn new(
         id: DeploymentId,
         application: ApplicationId,
         environment: EnvironmentId,
         artifact: Artifact,
     ) -> Self {
+        Self::new_with_release(
+            id,
+            application,
+            environment,
+            DeploymentMechanismKind::JarSystemd,
+            ReleaseIdentity::LocalFile(artifact),
+        )
+    }
+
+    pub fn new_with_release(
+        id: DeploymentId,
+        application: ApplicationId,
+        environment: EnvironmentId,
+        mechanism_kind: DeploymentMechanismKind,
+        release_identity: ReleaseIdentity,
+    ) -> Self {
         Self {
             id,
             application,
             environment,
-            artifact,
+            mechanism_kind,
+            release_identity,
             state: DeploymentState::Created,
         }
     }
 
+    /// Backward-compatible rehydration for pre-v0.2 rows that only contain the
+    /// legacy local-file identity columns.
     pub(crate) fn rehydrate(
         id: DeploymentId,
         application: ApplicationId,
@@ -188,11 +311,30 @@ impl Deployment {
         artifact: Artifact,
         state: DeploymentState,
     ) -> Self {
+        Self::rehydrate_with_release(
+            id,
+            application,
+            environment,
+            DeploymentMechanismKind::JarSystemd,
+            ReleaseIdentity::LocalFile(artifact),
+            state,
+        )
+    }
+
+    pub(crate) fn rehydrate_with_release(
+        id: DeploymentId,
+        application: ApplicationId,
+        environment: EnvironmentId,
+        mechanism_kind: DeploymentMechanismKind,
+        release_identity: ReleaseIdentity,
+        state: DeploymentState,
+    ) -> Self {
         Self {
             id,
             application,
             environment,
-            artifact,
+            mechanism_kind,
+            release_identity,
             state,
         }
     }
@@ -209,8 +351,20 @@ impl Deployment {
         &self.environment
     }
 
+    pub fn mechanism_kind(&self) -> DeploymentMechanismKind {
+        self.mechanism_kind
+    }
+
+    pub fn release_identity(&self) -> &ReleaseIdentity {
+        &self.release_identity
+    }
+
+    /// Compatibility projection for the v0.1 JAR-only call sites. New generic
+    /// orchestration and persistence code should use `release_identity()`.
     pub fn artifact(&self) -> &Artifact {
-        &self.artifact
+        self.release_identity
+            .local_file()
+            .expect("artifact() is only valid for local-file deployments")
     }
 
     pub fn state(&self) -> DeploymentState {
@@ -248,6 +402,10 @@ pub enum DeploymentError {
     InvalidArtifactSize,
     #[error("artifact sha256 must contain exactly 64 hexadecimal characters")]
     InvalidArtifactChecksum,
+    #[error("container image repository must not be empty")]
+    InvalidContainerRepository,
+    #[error("container image digest must be immutable sha256:<64-hex>")]
+    InvalidContainerDigest,
     #[error("invalid deployment transition: {from:?} -> {to:?}")]
     InvalidTransition {
         from: DeploymentState,
@@ -294,6 +452,48 @@ mod tests {
         assert_eq!(artifact.version(), "1.0.0");
         assert_eq!(artifact.size_bytes(), 42);
         assert_eq!(artifact.sha256(), SHA256);
+    }
+
+    #[test]
+    fn release_identity_supports_local_file_and_immutable_container_identity() {
+        let local = ReleaseIdentity::LocalFile(Artifact::new("1.0.0", 42, SHA256).unwrap());
+        assert_eq!(local.version(), "1.0.0");
+        assert!(local.local_file().is_some());
+
+        let image = ContainerImageReleaseIdentity::new(
+            "2.0.0",
+            "registry.example.com/demo",
+            format!("sha256:{}", SHA256.to_ascii_uppercase()),
+        )
+        .unwrap();
+        assert_eq!(image.digest(), format!("sha256:{SHA256}"));
+        let container = ReleaseIdentity::ContainerImage(image);
+        assert_eq!(container.version(), "2.0.0");
+        assert!(container.container_image().is_some());
+    }
+
+    #[test]
+    fn mutable_or_invalid_container_identity_is_rejected() {
+        assert_eq!(
+            ContainerImageReleaseIdentity::new("1.0.0", "", format!("sha256:{SHA256}"))
+                .unwrap_err(),
+            DeploymentError::InvalidContainerRepository
+        );
+        assert_eq!(
+            ContainerImageReleaseIdentity::new("1.0.0", "repo/demo", "latest").unwrap_err(),
+            DeploymentError::InvalidContainerDigest
+        );
+    }
+
+    #[test]
+    fn legacy_constructor_maps_to_jar_systemd_local_file_identity() {
+        let deployment = deployment();
+        assert_eq!(
+            deployment.mechanism_kind(),
+            DeploymentMechanismKind::JarSystemd
+        );
+        assert_eq!(deployment.release_identity().version(), "1.0.0");
+        assert_eq!(deployment.artifact().sha256(), SHA256);
     }
 
     #[test]

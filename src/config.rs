@@ -4,6 +4,7 @@ use std::path::{Component, Path};
 
 use serde::Deserialize;
 
+use crate::domain::DeploymentMechanismKind;
 use crate::error::{AppError, AppResult, ErrorCode};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -102,9 +103,26 @@ pub enum ArtifactType {
     Jar,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MechanismConfig {
+    #[serde(rename = "type")]
+    pub kind: DeploymentMechanismKind,
+}
+
+impl Default for MechanismConfig {
+    fn default() -> Self {
+        Self {
+            kind: DeploymentMechanismKind::JarSystemd,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentConfig {
+    #[serde(default)]
+    pub mechanism: MechanismConfig,
     pub target: String,
     pub staging_path: String,
     pub install_path: String,
@@ -181,6 +199,12 @@ impl Config {
 
             for (environment_id, environment) in &application.environments {
                 validate_reference("environment id", environment_id)?;
+                if environment.mechanism.kind != DeploymentMechanismKind::JarSystemd {
+                    return Err(AppError::invalid_configuration(format!(
+                        "deployment mechanism {} is not implemented in phase 8",
+                        environment.mechanism.kind.as_str()
+                    )));
+                }
                 validate_reference("target", &environment.target)?;
                 validate_absolute_path("staging_path", &environment.staging_path)?;
                 validate_absolute_path("install_path", &environment.install_path)?;
@@ -386,6 +410,10 @@ applications:
             vec!["/var/lib/deploy-mcp/artifacts"]
         );
         assert_eq!(environment.target, "test-server");
+        assert_eq!(
+            environment.mechanism.kind,
+            DeploymentMechanismKind::JarSystemd
+        );
         assert_eq!(environment.tasks.restart, "demo-restart");
         assert_eq!(
             config.application("demo-service").unwrap().artifact_type,
@@ -430,6 +458,35 @@ applications:
             assert_eq!(error.code, ErrorCode::InvalidConfiguration);
             assert!(error.message.contains("unknown field"), "{}", error.message);
         }
+    }
+
+    #[test]
+    fn parses_explicit_trusted_jar_systemd_mechanism() {
+        let raw = VALID_CONFIG.replace(
+            "        target: test-server",
+            "        mechanism:\n          type: jar_systemd\n        target: test-server",
+        );
+        let config = Config::from_yaml(&raw).unwrap();
+        assert_eq!(
+            config
+                .environment("demo-service", "test")
+                .unwrap()
+                .mechanism
+                .kind,
+            DeploymentMechanismKind::JarSystemd
+        );
+    }
+
+    #[test]
+    fn rejects_unimplemented_mechanism_before_remote_work() {
+        let raw = VALID_CONFIG.replace(
+            "        target: test-server",
+            "        mechanism:\n          type: docker_compose\n        target: test-server",
+        );
+        let error = Config::from_yaml(&raw).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfiguration);
+        assert!(error.message.contains("docker_compose"));
+        assert!(error.message.contains("not implemented in phase 8"));
     }
 
     #[test]

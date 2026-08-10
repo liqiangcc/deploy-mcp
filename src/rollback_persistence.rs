@@ -9,8 +9,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{params, Connection, ErrorCode, OptionalExtension, Transaction};
 
 use crate::domain::{
-    ApplicationId, DeploymentId, EnvironmentId, RollbackOperation, RollbackOperationId,
-    RollbackOperationState, RollbackReference, RollbackReferenceState,
+    ApplicationId, DeploymentId, DeploymentMechanismKind, EnvironmentId,
+    MechanismContractFingerprint, RollbackMechanismSnapshot, RollbackOperation,
+    RollbackOperationId, RollbackOperationState, RollbackReference, RollbackReferenceState,
 };
 use crate::ports::{
     RepositoryError, RepositoryResult, RollbackRepository, RollbackRetentionRepository,
@@ -19,6 +20,7 @@ use crate::ports::{
 const INITIAL_MIGRATION: &str = include_str!("../migrations/001_initial.sql");
 const RETENTION_MIGRATION: &str =
     include_str!("../migrations/005_rollback_reference_retention.sql");
+const GENERIC_MODEL_MIGRATION: &str = include_str!("../migrations/006_v0_2_generic_model.sql");
 
 type ReferenceRow = (
     String,
@@ -31,6 +33,9 @@ type ReferenceRow = (
     String,
     String,
     String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
 );
 type OperationRow = (String, String, String, String, String);
 
@@ -53,6 +58,9 @@ impl SqliteRollbackRepository {
             .map_err(storage_error)?;
         connection
             .execute_batch(RETENTION_MIGRATION)
+            .map_err(storage_error)?;
+        connection
+            .execute_batch(GENERIC_MODEL_MIGRATION)
             .map_err(storage_error)?;
         Ok(Self { connection })
     }
@@ -112,6 +120,11 @@ impl RollbackRepository for SqliteRollbackRepository {
             )
             .map_err(storage_error)?;
 
+        let snapshot = reference.jar_systemd_snapshot().ok_or_else(|| {
+            RepositoryError::Storage(
+                "non-jar rollback snapshot persistence is reserved for phase 9".into(),
+            )
+        })?;
         let now = now_unix_ms();
         transaction
             .execute(
@@ -126,12 +139,29 @@ impl RollbackRepository for SqliteRollbackRepository {
                     reference.application().as_str(),
                     reference.environment().as_str(),
                     reference.target(),
-                    reference.backup_path(),
-                    reference.install_path(),
-                    reference.rollback_task(),
-                    reference.restart_task(),
-                    reference.health_check_task(),
+                    snapshot.backup_path(),
+                    snapshot.install_path(),
+                    snapshot.rollback_task(),
+                    snapshot.restart_task(),
+                    snapshot.health_check_task(),
                     now,
+                ],
+            )
+            .map_err(storage_error)?;
+        let snapshot_json =
+            serde_json::to_string(reference.mechanism_snapshot()).map_err(|error| {
+                RepositoryError::Storage(format!("serialize rollback mechanism snapshot: {error}"))
+            })?;
+        transaction
+            .execute(
+                "INSERT INTO rollback_reference_model (
+                     deployment_id, mechanism_kind, contract_fingerprint, mechanism_snapshot_json
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    reference.deployment_id().as_str(),
+                    reference.mechanism_kind().as_str(),
+                    reference.contract_fingerprint().as_str(),
+                    snapshot_json,
                 ],
             )
             .map_err(storage_error)?;
@@ -144,11 +174,13 @@ impl RollbackRepository for SqliteRollbackRepository {
     ) -> RepositoryResult<Option<RollbackReference>> {
         self.connection
             .query_row(
-                "SELECT deployment_id, application_id, environment_id,
-                        target, backup_path, install_path,
-                        rollback_task, restart_task, health_check_task, state
+                "SELECT rr.deployment_id, rr.application_id, rr.environment_id,
+                        rr.target, rr.backup_path, rr.install_path,
+                        rr.rollback_task, rr.restart_task, rr.health_check_task, rr.state,
+                        model.mechanism_kind, model.contract_fingerprint, model.mechanism_snapshot_json
                  FROM rollback_references rr
-                 WHERE deployment_id = ?1
+                 LEFT JOIN rollback_reference_model model ON model.deployment_id = rr.deployment_id
+                 WHERE rr.deployment_id = ?1
                    AND NOT EXISTS (
                        SELECT 1 FROM rollback_reference_retention retention
                        WHERE retention.deployment_id = rr.deployment_id
@@ -169,11 +201,13 @@ impl RollbackRepository for SqliteRollbackRepository {
         let transaction = self.connection.transaction().map_err(storage_error)?;
         let row = transaction
             .query_row(
-                "SELECT deployment_id, application_id, environment_id,
-                        target, backup_path, install_path,
-                        rollback_task, restart_task, health_check_task, state
-                 FROM rollback_references
-                 WHERE deployment_id = ?1 AND state = 'active'",
+                "SELECT rr.deployment_id, rr.application_id, rr.environment_id,
+                        rr.target, rr.backup_path, rr.install_path,
+                        rr.rollback_task, rr.restart_task, rr.health_check_task, rr.state,
+                        model.mechanism_kind, model.contract_fingerprint, model.mechanism_snapshot_json
+                 FROM rollback_references rr
+                 LEFT JOIN rollback_reference_model model ON model.deployment_id = rr.deployment_id
+                 WHERE rr.deployment_id = ?1 AND rr.state = 'active'",
                 params![operation.source_deployment_id().as_str()],
                 reference_row,
             )
@@ -366,6 +400,17 @@ impl RollbackRetentionRepository for SqliteRollbackRepository {
                     params![pruned_at_unix_ms],
                 )
                 .map_err(storage_error)?;
+            transaction
+                .execute(
+                    "DELETE FROM rollback_reference_model
+                     WHERE deployment_id IN (
+                         SELECT deployment_id
+                         FROM rollback_reference_retention
+                         WHERE snapshot_pruned_at_unix_ms = ?1
+                     )",
+                    params![pruned_at_unix_ms],
+                )
+                .map_err(storage_error)?;
         }
         transaction.commit().map_err(storage_error)?;
         Ok(inserted)
@@ -424,6 +469,9 @@ fn reference_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReferenceRow> {
         row.get(7)?,
         row.get(8)?,
         row.get(9)?,
+        row.get(10)?,
+        row.get(11)?,
+        row.get(12)?,
     ))
 }
 
@@ -439,19 +487,63 @@ fn decode_reference(row: ReferenceRow) -> RepositoryResult<RollbackReference> {
         restart_task,
         health_check_task,
         state,
+        mechanism_kind,
+        contract_fingerprint,
+        mechanism_snapshot_json,
     ) = row;
-    Ok(RollbackReference::rehydrate(
-        DeploymentId::new(deployment_id).map_err(corrupt_domain)?,
-        ApplicationId::new(application).map_err(corrupt_domain)?,
-        EnvironmentId::new(environment).map_err(corrupt_domain)?,
-        target,
-        backup_path,
-        install_path,
-        rollback_task,
-        restart_task,
-        health_check_task,
-        parse_reference_state(&state)?,
-    ))
+    let deployment_id = DeploymentId::new(deployment_id).map_err(corrupt_domain)?;
+    let application = ApplicationId::new(application).map_err(corrupt_domain)?;
+    let environment = EnvironmentId::new(environment).map_err(corrupt_domain)?;
+    let state = parse_reference_state(&state)?;
+
+    match (
+        mechanism_kind,
+        contract_fingerprint,
+        mechanism_snapshot_json,
+    ) {
+        (None, None, None) => Ok(RollbackReference::rehydrate(
+            deployment_id,
+            application,
+            environment,
+            target,
+            backup_path,
+            install_path,
+            rollback_task,
+            restart_task,
+            health_check_task,
+            state,
+        )),
+        (Some(mechanism_kind), Some(contract_fingerprint), Some(snapshot_json)) => {
+            let mechanism_kind =
+                DeploymentMechanismKind::parse(&mechanism_kind).ok_or_else(|| {
+                    RepositoryError::CorruptData(format!(
+                        "unknown rollback mechanism kind: {mechanism_kind}"
+                    ))
+                })?;
+            let contract_fingerprint = MechanismContractFingerprint::new(contract_fingerprint)
+                .map_err(corrupt_rollback)?;
+            let mechanism_snapshot: RollbackMechanismSnapshot =
+                serde_json::from_str(&snapshot_json).map_err(|error| {
+                    RepositoryError::CorruptData(format!(
+                        "invalid rollback mechanism snapshot metadata: {error}"
+                    ))
+                })?;
+            RollbackReference::rehydrate_with_snapshot(
+                deployment_id,
+                application,
+                environment,
+                mechanism_kind,
+                target,
+                contract_fingerprint,
+                mechanism_snapshot,
+                state,
+            )
+            .map_err(corrupt_rollback)
+        }
+        _ => Err(RepositoryError::CorruptData(
+            "rollback reference model metadata is partially present".into(),
+        )),
+    }
 }
 
 fn operation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRow> {

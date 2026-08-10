@@ -10,7 +10,7 @@ use super::{
     },
     DeploymentLockManager,
 };
-use crate::config::{Config, EnvironmentConfig};
+use crate::config::Config;
 use crate::domain::{
     DeploymentId, DeploymentState, RollbackOperation, RollbackOperationId, RollbackOperationState,
     RollbackReference,
@@ -147,7 +147,16 @@ where
                     ),
                 )
             })?;
-        ensure_environment_contract(environment, &reference)?;
+        if deployment.mechanism_kind() != self.mechanism.kind()
+            || !self
+                .mechanism
+                .rollback_contract_matches(environment, &reference)
+        {
+            return Err(AppError::new(
+                ErrorCode::RollbackUnavailable,
+                "deployment mechanism contract changed since the rollback reference was created",
+            ));
+        }
 
         let _lease = self
             .locks
@@ -248,6 +257,10 @@ where
     async fn preflight(&self, reference: &RollbackReference) -> Option<RollbackFailure> {
         match self.mechanism.preflight_rollback(reference).await {
             Ok(_) => None,
+            Err(RollbackPreflightError::MechanismMismatch) => Some(RollbackFailure::new(
+                ErrorCode::RollbackUnavailable,
+                "rollback reference mechanism does not match the configured mechanism",
+            )),
             Err(RollbackPreflightError::TargetUnreachable(target)) => Some(RollbackFailure::new(
                 ErrorCode::PrecheckFailed,
                 format!("rollback target is not reachable: {target}"),
@@ -424,32 +437,6 @@ fn task_failure(action: &str, task: &str, result: &RemoteTaskResult) -> Rollback
             result.exit_code
         ),
     )
-}
-
-fn ensure_environment_contract(
-    environment: &EnvironmentConfig,
-    reference: &RollbackReference,
-) -> AppResult<()> {
-    let rollback_task = environment.tasks.rollback.as_deref().ok_or_else(|| {
-        AppError::new(
-            ErrorCode::RollbackUnavailable,
-            "rollback task is no longer configured",
-        )
-    })?;
-    let unchanged = environment.target == reference.target()
-        && environment.backup_path == reference.backup_path()
-        && environment.install_path == reference.install_path()
-        && rollback_task == reference.rollback_task()
-        && environment.tasks.restart == reference.restart_task()
-        && environment.tasks.health_check == reference.health_check_task();
-    if unchanged {
-        Ok(())
-    } else {
-        Err(AppError::new(
-            ErrorCode::RollbackUnavailable,
-            "deployment environment contract changed since the rollback reference was created",
-        ))
-    }
 }
 
 fn repository_error(error: RepositoryError) -> AppError {
