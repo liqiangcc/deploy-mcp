@@ -1,0 +1,24 @@
+name: Phase 9 Source Export
+
+on:
+  push:
+    branches:
+      - feat/v0.2-docker-compose-mechanism
+    paths:
+      - .github/workflows/phase9-source-export.yml
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Archive source
+        run: tar --exclude=.git -czf deploy-mcp-source.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deploy-mcp-phase9-source
+          path: deploy-mcp-source.tar.gz
+          retention-days: 1
