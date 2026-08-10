@@ -6,6 +6,7 @@ on:
       - feat/v0.2-docker-compose-mechanism
     paths:
       - .github/workflows/phase9-e2e-validate.yml
+      - scripts/e2e/setup_real_docker_compose_target.sh
 
 permissions:
   contents: write
