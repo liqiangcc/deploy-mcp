@@ -10,9 +10,7 @@ use deploy_mcp::config::Config;
 use deploy_mcp::domain::{DeploymentState, RollbackOperationState};
 use deploy_mcp::error::ErrorCode;
 use deploy_mcp::persistence::SqliteDeploymentRepository;
-use deploy_mcp::ports::{
-    RemoteTargetCheck, RemoteTaskResult, RollbackRepository,
-};
+use deploy_mcp::ports::{RemoteTargetCheck, RemoteTaskResult, RollbackRepository};
 use deploy_mcp::rollback_persistence::SqliteRollbackRepository;
 use serde_json::Value;
 use tempfile::TempDir;
@@ -23,7 +21,8 @@ const PROJECT: &str = "demo-project";
 const SERVICE: &str = "app";
 const OLD_DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const NEW_DIGEST: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-const OTHER_DIGEST: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const OTHER_DIGEST: &str =
+    "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
 const TASKS: [&str; 6] = [
     "compose-prepare",
@@ -114,10 +113,17 @@ fn configured_remote() -> FakeRemoteExecution {
     );
     remote.set_tasks(
         TARGET,
-        Ok(TASKS.into_iter().map(str::to_owned).collect::<BTreeSet<_>>()),
+        Ok(TASKS
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()),
     );
     for task in TASKS {
-        let stdout = if task == "compose-current" { OLD_DIGEST } else { "" };
+        let stdout = if task == "compose-current" {
+            OLD_DIGEST
+        } else {
+            ""
+        };
         remote.set_task_result(TARGET, task, Ok(success(stdout)));
     }
     remote
@@ -162,16 +168,25 @@ fn request(digest: &str, key: &str) -> ContainerDeployRequest {
 
 fn candidate_parameters(digest: &str) -> BTreeMap<String, Value> {
     BTreeMap::from([
-        ("image_repository".to_owned(), Value::String(REPOSITORY.to_owned())),
+        (
+            "image_repository".to_owned(),
+            Value::String(REPOSITORY.to_owned()),
+        ),
         ("digest".to_owned(), Value::String(digest.to_owned())),
-        ("compose_project".to_owned(), Value::String(PROJECT.to_owned())),
+        (
+            "compose_project".to_owned(),
+            Value::String(PROJECT.to_owned()),
+        ),
         ("service".to_owned(), Value::String(SERVICE.to_owned())),
     ])
 }
 
 fn service_parameters(service: &str) -> BTreeMap<String, Value> {
     BTreeMap::from([
-        ("compose_project".to_owned(), Value::String(PROJECT.to_owned())),
+        (
+            "compose_project".to_owned(),
+            Value::String(PROJECT.to_owned()),
+        ),
         ("service".to_owned(), Value::String(service.to_owned())),
     ])
 }
@@ -182,7 +197,10 @@ async fn deploy_success(fixture: &Fixture) -> DeploymentExecutionResult {
         .deploy_container_application(request(NEW_DIGEST, "docker-release-1"))
         .await
         .unwrap();
-    assert_eq!(result.outcome.deployment.state(), DeploymentState::Succeeded);
+    assert_eq!(
+        result.outcome.deployment.state(),
+        DeploymentState::Succeeded
+    );
     assert!(result.rollback_reference_available);
     assert!(result.rollback_reference_error.is_none());
     result
@@ -196,8 +214,12 @@ async fn docker_deploy_and_explicit_rollback_use_only_trusted_named_tasks() {
     assert_eq!(
         fixture.remote.calls(),
         vec![
-            FakeRemoteCall::CheckTarget { target: TARGET.to_owned() },
-            FakeRemoteCall::ListTasks { target: TARGET.to_owned() },
+            FakeRemoteCall::CheckTarget {
+                target: TARGET.to_owned()
+            },
+            FakeRemoteCall::ListTasks {
+                target: TARGET.to_owned()
+            },
             FakeRemoteCall::RunTask {
                 target: TARGET.to_owned(),
                 task: "compose-prepare".to_owned(),
@@ -232,15 +254,22 @@ async fn docker_deploy_and_explicit_rollback_use_only_trusted_named_tasks() {
         .rollback_deployment(result.outcome.deployment.id().as_str())
         .await
         .unwrap();
-    assert_eq!(rollback.operation.state(), RollbackOperationState::Succeeded);
+    assert_eq!(
+        rollback.operation.state(),
+        RollbackOperationState::Succeeded
+    );
     assert!(rollback.failure.is_none());
 
     let calls = fixture.remote.calls();
     assert_eq!(
         &calls[before..],
         &[
-            FakeRemoteCall::CheckTarget { target: TARGET.to_owned() },
-            FakeRemoteCall::ListTasks { target: TARGET.to_owned() },
+            FakeRemoteCall::CheckTarget {
+                target: TARGET.to_owned()
+            },
+            FakeRemoteCall::ListTasks {
+                target: TARGET.to_owned()
+            },
             FakeRemoteCall::RunTask {
                 target: TARGET.to_owned(),
                 task: "compose-rollback".to_owned(),
@@ -258,7 +287,9 @@ async fn docker_deploy_and_explicit_rollback_use_only_trusted_named_tasks() {
             },
         ]
     );
-    assert!(!calls.iter().any(|call| matches!(call, FakeRemoteCall::UploadFile { .. })));
+    assert!(!calls
+        .iter()
+        .any(|call| matches!(call, FakeRemoteCall::UploadFile { .. })));
 }
 
 #[tokio::test]
@@ -295,7 +326,10 @@ async fn apply_failure_automatically_rolls_back_captured_digest() {
         .deploy_container_application(request(NEW_DIGEST, "apply-failure"))
         .await
         .unwrap();
-    assert_eq!(result.outcome.deployment.state(), DeploymentState::RolledBack);
+    assert_eq!(
+        result.outcome.deployment.state(),
+        DeploymentState::RolledBack
+    );
     assert_eq!(
         result.outcome.failure.as_ref().unwrap().code,
         ErrorCode::RemoteExecutionFailed

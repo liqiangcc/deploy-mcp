@@ -169,7 +169,10 @@ async fn real_remote_exec_mcp_deploys_and_rolls_back_docker_compose_by_digest() 
 
     let applications = call_tool(&client, "list_applications", json!({})).await;
     assert_eq!(applications["applications"][0]["id"], "demo-service");
-    assert_eq!(applications["applications"][0]["artifact_type"], "container_image");
+    assert_eq!(
+        applications["applications"][0]["artifact_type"],
+        "container_image"
+    );
 
     let deployment = call_tool(
         &client,
@@ -188,8 +191,14 @@ async fn real_remote_exec_mcp_deploys_and_rolls_back_docker_compose_by_digest() 
     .await;
     assert_eq!(deployment["deployment"]["state"], "succeeded");
     assert_eq!(deployment["deployment"]["mechanism"], "docker_compose");
-    assert_eq!(deployment["deployment"]["release"]["type"], "container_image");
-    assert_eq!(deployment["deployment"]["release"]["repository"], repository);
+    assert_eq!(
+        deployment["deployment"]["release"]["type"],
+        "container_image"
+    );
+    assert_eq!(
+        deployment["deployment"]["release"]["repository"],
+        repository
+    );
     assert_eq!(deployment["deployment"]["release"]["digest"], digest_v1);
     assert!(deployment["failure"].is_null());
     assert_eq!(deployment["rollback_reference_available"], true);
@@ -232,7 +241,10 @@ async fn real_remote_exec_mcp_deploys_and_rolls_back_docker_compose_by_digest() 
         "compose-health",
         "compose-rollback",
     ] {
-        assert!(audit.contains(task), "remote-exec audit did not contain {task}");
+        assert!(
+            audit.contains(task),
+            "remote-exec audit did not contain {task}"
+        );
     }
     assert!(!audit.contains("upload_file"));
     assert!(!audit.contains("REMOTE_EXEC_SSH_KEY"));
