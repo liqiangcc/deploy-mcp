@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use super::{
-    DeployRequest, DeployService, DeploymentLockManager, DeploymentOutcome, RollbackOutcome,
-    RollbackRequest, RollbackService,
+    DeployRequest, DeployService, DeploymentLockManager, DeploymentOutcome, JarSystemdMechanism,
+    RollbackOutcome, RollbackRequest, RollbackService,
 };
 use crate::config::{ArtifactType, Config};
 use crate::domain::{Deployment, DeploymentId, DeploymentState, RollbackReference};
@@ -64,8 +64,8 @@ where
     D: DeploymentRepository + Send,
 {
     config: Arc<Config>,
-    deploy: DeployService<R, D>,
-    rollback: RollbackService<R, D>,
+    deploy: DeployService<JarSystemdMechanism<R>, D>,
+    rollback: RollbackService<JarSystemdMechanism<R>, D>,
     repository: Arc<Mutex<D>>,
     rollback_repository: Arc<Mutex<Box<dyn RollbackRepository + Send>>>,
     audit_repository: Option<Arc<dyn AuditRepository>>,
@@ -83,15 +83,16 @@ where
         rollback_repository: Arc<Mutex<Box<dyn RollbackRepository + Send>>>,
     ) -> Self {
         let locks = DeploymentLockManager::default();
-        let deploy = DeployService::new(
+        let mechanism = Arc::new(JarSystemdMechanism::new(remote));
+        let deploy = DeployService::with_mechanism(
             Arc::clone(&config),
-            Arc::clone(&remote),
+            Arc::clone(&mechanism),
             Arc::clone(&repository),
         )
         .with_lock_manager(locks.clone());
-        let rollback = RollbackService::new(
+        let rollback = RollbackService::with_mechanism(
             Arc::clone(&config),
-            remote,
+            mechanism,
             Arc::clone(&repository),
             Arc::clone(&rollback_repository),
             locks,
